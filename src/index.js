@@ -435,6 +435,11 @@ async function ChangeEvent() {
         index: index,
       })
     );
+
+    getAllEvent[index].name = event1.name;
+    getAllEvent[index].date = event1.time;
+    ui[10].content.value.options[index] = index + 1 + "　" + event1.name;
+
     warning("发送成功！", 15);
   } catch (error) {
     console.error(error);
@@ -475,7 +480,7 @@ AstroBox.event.addEventListener("onQAICMessage_com.yzf.daymatter", (data) => {
   getAllEvent = datas.data;
   let names = datas.data.map((item, index) => index + 1 + "　" + item.name);
   ui[10].content.value.options = names;
-  warning("获取手环端数据成功！", 15);
   ui[16].visibility = false;
   ui[17].visibility = true;
+  warning("获取手环端数据成功！", 15);
 });
