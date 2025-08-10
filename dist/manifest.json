@@ -1,0 +1,12 @@
+{
+  "name": "倒数日配置工具",
+  "icon": "icon.png",
+  "version": "1.0",
+  "description": "在AstroBox中快速添加和修改倒数日相关信息",
+  "author": "小鱼yuzifu",
+  "website": "https://github.com/sf-yuzifu/Daymatter-AstroBox-Plugin",
+  "entry": "main.js",
+  "api_level": 1,
+  "permissions": ["lifecycle", "interconnect", "ui", "native", "thirdpartyapp", "event"],
+  "additional_files": []
+}
