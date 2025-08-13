@@ -443,7 +443,7 @@ async function AddEvent() {
       warning("请先安装倒数日快应用");
       return;
     } else if (app.version_code < 10300) {
-      warning("请先安装倒数日快应用的版本！");
+      warning("请先安装倒数日快应用的新版本！");
       return;
     }
 
@@ -479,7 +479,7 @@ async function DeleteEvent() {
       warning("请先安装倒数日快应用", 20);
       return;
     } else if (app.version_code < 10300) {
-      warning("请先安装倒数日快应用的版本！", 20);
+      warning("请先安装倒数日快应用的新版本！", 20);
       return;
     }
 
@@ -525,7 +525,7 @@ async function ChangeEvent() {
       warning("请先安装倒数日快应用", 15);
       return;
     } else if (app.version_code < 10300) {
-      warning("请先安装倒数日快应用的版本！", 15);
+      warning("请先安装倒数日快应用的新版本！", 15);
       return;
     }
 
@@ -568,7 +568,7 @@ async function getEvent() {
       warning("请先安装倒数日快应用", id);
       return;
     } else if (app.version_code < 10300) {
-      warning("请先安装倒数日快应用的版本！", id);
+      warning("请先安装倒数日快应用的新版本！", id);
       return;
     }
 
