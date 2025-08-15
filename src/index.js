@@ -10,11 +10,15 @@ let whoGetEvent = 0;
 const event = {
   name: "",
   time: dayjs().format("YYYY-MM-DD"),
+  on_index: true,
+  IFStaringDay: false,
 };
 
 const event1 = {
   name: "",
   time: "",
+  on_index: true,
+  IFStaringDay: false,
 };
 
 dayjs.extend(customParseFormat);
@@ -22,8 +26,12 @@ dayjs.extend(customParseFormat);
 // UI服务启动
 let onEventName = AstroBox.native.regNativeFun(eventName);
 let onEventTime = AstroBox.native.regNativeFun(eventTime);
+let onEventIndex = AstroBox.native.regNativeFun(eventIndex);
+let onEventIFStaringDay = AstroBox.native.regNativeFun(eventIFStaringDay);
 let onEventName1 = AstroBox.native.regNativeFun(eventName1);
 let onEventTime1 = AstroBox.native.regNativeFun(eventTime1);
+let onEventIndex1 = AstroBox.native.regNativeFun(eventIndex1);
+let onEventIFStaringDay1 = AstroBox.native.regNativeFun(eventIFStaringDay1);
 let AddEventId = AstroBox.native.regNativeFun(AddEvent);
 let onTab = AstroBox.native.regNativeFun(Tab);
 let getEventId = AstroBox.native.regNativeFun(getEvent);
@@ -39,8 +47,10 @@ async function selectEvent(text) {
   }
   event1.name = getAllEvent[index].name;
   event1.time = getAllEvent[index].date;
+  event1.on_index = getAllEvent[index].on_index;
+  event1.IFStaringDay = getAllEvent[index].IFStaringDay;
   console.log(JSON.stringify(event1));
-  ui[12] = {
+  ui[16] = {
     node_id: "eventName2",
     visibility: true,
     disabled: false,
@@ -49,7 +59,7 @@ async function selectEvent(text) {
       value: { text: event1.name, callback_fun_id: onEventName1 },
     },
   };
-  ui[14] = {
+  ui[18] = {
     node_id: "eventTime2",
     visibility: true,
     disabled: false,
@@ -58,12 +68,14 @@ async function selectEvent(text) {
       value: { text: event1.time, callback_fun_id: onEventTime1 },
     },
   };
-  ui[12].visibility = false;
-  ui[14].visibility = false;
+  ui[19].content.value = `<span style="margin-left: 13%;">是否显示在主页<span style="color:red;">（当前选中：${event1.on_index ? "是" : "否"}）</span></span>`;
+  ui[21].content.value = `<span style="margin-left: 13%;">是否计入起始日<span style="color:red;">（当前选中：${event1.IFStaringDay ? "是" : "否"}）</span></span>`;
+  ui[16].visibility = false;
+  ui[18].visibility = false;
   AstroBox.ui.updatePluginSettingsUI(ui);
   await sleep(100);
-  ui[12].visibility = true;
-  ui[14].visibility = true;
+  ui[16].visibility = true;
+  ui[18].visibility = true;
   AstroBox.ui.updatePluginSettingsUI(ui);
 }
 
@@ -76,15 +88,15 @@ async function Tab(text) {
   }
   switch (text) {
     case "添加事件":
-      for (let i = 2; i <= 8; i++) {
-        if (i != 7) {
+      for (let i = 2; i <= 12; i++) {
+        if (i != 11) {
           ui[i].visibility = true;
         }
       }
       break;
     case "修改事件":
-      for (let i = 9; i <= 16; i++) {
-        if (i != 15) {
+      for (let i = 13; i <= 24; i++) {
+        if (i != 23) {
           ui[i].visibility = true;
         }
       }
@@ -92,9 +104,11 @@ async function Tab(text) {
       getAllEvent = [];
       event1.name = "";
       event1.time = "";
+      event1.on_index = true;
+      event1.IFStaringDay = false;
       index = "";
-      ui[10].content.value.options = [];
-      ui[12] = {
+      ui[14].content.value.options = [];
+      ui[16] = {
         node_id: "eventName2",
         visibility: true,
         disabled: false,
@@ -103,7 +117,7 @@ async function Tab(text) {
           value: { text: event1.name, callback_fun_id: onEventName1 },
         },
       };
-      ui[14] = {
+      ui[18] = {
         node_id: "eventTime2",
         visibility: true,
         disabled: false,
@@ -114,8 +128,8 @@ async function Tab(text) {
       };
       break;
     case "删除事件":
-      for (let i = 18; i <= 21; i++) {
-        if (i != 20) {
+      for (let i = 26; i <= 29; i++) {
+        if (i != 28) {
           ui[i].visibility = true;
         }
       }
@@ -132,7 +146,7 @@ async function Tab(text) {
 async function eventName(text) {
   event.name = text;
   ui[4] = {
-    node_id: "eventName",
+    node_id: "eventName1",
     visibility: true,
     disabled: false,
     content: {
@@ -146,7 +160,7 @@ async function eventName(text) {
 async function eventTime(text) {
   event.time = text;
   ui[6] = {
-    node_id: "eventTime",
+    node_id: "eventTime1",
     visibility: true,
     disabled: false,
     content: {
@@ -154,6 +168,50 @@ async function eventTime(text) {
       value: { text: event.time, callback_fun_id: onEventTime },
     },
   };
+  AstroBox.ui.updatePluginSettingsUI(ui);
+}
+
+async function eventIndex(text) {
+  if (text == "否") {
+    event.on_index = false;
+    ui[7].content.value = `<span style="margin-left: 13%;">是否显示在主页<span style="color:red;">（当前选中：否）</span></span>`;
+  } else {
+    event.on_index = true;
+    ui[7].content.value = `<span style="margin-left: 13%;">是否显示在主页<span style="color:red;">（当前选中：是）</span></span>`;
+  }
+  AstroBox.ui.updatePluginSettingsUI(ui);
+}
+
+async function eventIFStaringDay(text) {
+  if (text == "是") {
+    event.IFStaringDay = true;
+    ui[9].content.value = `<span style="margin-left: 13%;">是否计入起始日<span style="color:red;">（当前选中：是）</span></span>`;
+  } else {
+    event.IFStaringDay = false;
+    ui[9].content.value = `<span style="margin-left: 13%;">是否计入起始日<span style="color:red;">（当前选中：否）</span></span>`;
+  }
+  AstroBox.ui.updatePluginSettingsUI(ui);
+}
+
+async function eventIndex1(text) {
+  if (text == "否") {
+    event1.on_index = false;
+    ui[19].content.value = `<span style="margin-left: 13%;">是否显示在主页<span style="color:red;">（当前选中：否）</span></span>`;
+  } else {
+    event1.on_index = true;
+    ui[19].content.value = `<span style="margin-left: 13%;">是否显示在主页<span style="color:red;">（当前选中：是）</span></span>`;
+  }
+  AstroBox.ui.updatePluginSettingsUI(ui);
+}
+
+async function eventIFStaringDay1(text) {
+  if (text == "是") {
+    event1.IFStaringDay = true;
+    ui[21].content.value = `<span style="margin-left: 13%;">是否计入起始日<span style="color:red;">（当前选中：是）</span></span>`;
+  } else {
+    event1.IFStaringDay = false;
+    ui[21].content.value = `<span style="margin-left: 13%;">是否计入起始日<span style="color:red;">（当前选中：否）</span></span>`;
+  }
   AstroBox.ui.updatePluginSettingsUI(ui);
 }
 
@@ -167,7 +225,7 @@ async function eventTime1(text) {
 
 const sleep = (delay) => new Promise((resolve) => setTimeout(resolve, delay));
 
-async function warning(warn, type = 7) {
+async function warning(warn, type = 11) {
   ui[type].content.value = `
           <span style="display:inline-block;width:100%;text-align:center;font-weight:bold;color:red;">${warn}</span>
           `;
@@ -203,7 +261,7 @@ AstroBox.lifecycle.onLoad(() => {
         },
       },
     },
-    // 添加事件UI（2～8）
+    // 添加事件UI（2～12），警告11
     {
       node_id: "title",
       visibility: true,
@@ -256,6 +314,52 @@ AstroBox.lifecycle.onLoad(() => {
       },
     },
     {
+      node_id: "html31",
+      visibility: true,
+      disabled: false,
+      content: {
+        type: "HtmlDocument",
+        value: `
+          <span style="margin-left: 13%;">是否显示在主页<span style="color:red;">（当前选中：是）</span></span>
+          `,
+      },
+    },
+    {
+      node_id: "tab11",
+      visibility: true,
+      disabled: false,
+      content: {
+        type: "Dropdown",
+        value: {
+          options: ["是", "否"],
+          callback_fun_id: onEventIndex,
+        },
+      },
+    },
+    {
+      node_id: "html32",
+      visibility: true,
+      disabled: false,
+      content: {
+        type: "HtmlDocument",
+        value: `
+          <span style="margin-left: 13%;">是否计入起始日<span style="color:red;">（当前选中：否）</span></span>
+          `,
+      },
+    },
+    {
+      node_id: "tab12",
+      visibility: true,
+      disabled: false,
+      content: {
+        type: "Dropdown",
+        value: {
+          options: ["是", "否"],
+          callback_fun_id: onEventIFStaringDay,
+        },
+      },
+    },
+    {
       node_id: "warn0",
       visibility: false,
       disabled: false,
@@ -275,7 +379,7 @@ AstroBox.lifecycle.onLoad(() => {
         value: { primary: true, text: "发送", callback_fun_id: AddEventId },
       },
     },
-    // 修改事件UI（9～17）
+    // 修改事件UI（13～25），警告23
     {
       node_id: "html3",
       visibility: true,
@@ -340,6 +444,52 @@ AstroBox.lifecycle.onLoad(() => {
       },
     },
     {
+      node_id: "html311",
+      visibility: true,
+      disabled: false,
+      content: {
+        type: "HtmlDocument",
+        value: `
+          <span style="margin-left: 13%;">是否显示在主页</span>
+          `,
+      },
+    },
+    {
+      node_id: "tab111",
+      visibility: true,
+      disabled: false,
+      content: {
+        type: "Dropdown",
+        value: {
+          options: ["是", "否"],
+          callback_fun_id: onEventIndex1,
+        },
+      },
+    },
+    {
+      node_id: "html321",
+      visibility: true,
+      disabled: false,
+      content: {
+        type: "HtmlDocument",
+        value: `
+          <span style="margin-left: 13%;">是否计入起始日</span>
+          `,
+      },
+    },
+    {
+      node_id: "tab121",
+      visibility: true,
+      disabled: false,
+      content: {
+        type: "Dropdown",
+        value: {
+          options: ["是", "否"],
+          callback_fun_id: onEventIFStaringDay1,
+        },
+      },
+    },
+    {
       node_id: "warn1",
       visibility: false,
       disabled: false,
@@ -368,7 +518,7 @@ AstroBox.lifecycle.onLoad(() => {
         value: { primary: true, text: "同步", callback_fun_id: ChangeEventId },
       },
     },
-    // 修改事件UI（18～22）
+    // 删除事件UI（26～30），警告28
     {
       node_id: "html6",
       visibility: true,
@@ -442,7 +592,7 @@ async function AddEvent() {
     if (!app) {
       warning("请先安装倒数日快应用");
       return;
-    } else if (app.version_code < 10300) {
+    } else if (app.version_code < 10400) {
       warning("请先安装倒数日快应用的新版本！");
       return;
     }
@@ -455,7 +605,8 @@ async function AddEvent() {
         type: "addEvent",
         name: event.name,
         date: event.time,
-        on_index: true,
+        on_index: event.on_index,
+        IFStaringDay: event.IFStaringDay,
       })
     );
     warning("发送成功！");
@@ -466,8 +617,8 @@ async function AddEvent() {
 }
 
 async function DeleteEvent() {
-  if (index == "") {
-    warning("请选择你要删除的事件！", 20);
+  if (index === "") {
+    warning("请选择你要删除的事件！", 28);
     return;
   }
 
@@ -476,14 +627,14 @@ async function DeleteEvent() {
     const app = appList.find((app) => app.package_name == "com.yzf.daymatter");
     await AstroBox.thirdpartyapp.launchQA(app, "/pages/index");
     if (!app) {
-      warning("请先安装倒数日快应用", 20);
+      warning("请先安装倒数日快应用", 28);
       return;
-    } else if (app.version_code < 10300) {
-      warning("请先安装倒数日快应用的新版本！", 20);
+    } else if (app.version_code < 10400) {
+      warning("请先安装倒数日快应用的新版本！", 28);
       return;
     }
 
-    await warning("正在发送，请稍等···", 20);
+    await warning("正在发送，请稍等···", 28);
 
     await AstroBox.interconnect.sendQAICMessage(
       "com.yzf.daymatter",
@@ -495,25 +646,25 @@ async function DeleteEvent() {
 
     getAllEvent.splice(index, 1);
     console.log(JSON.stringify(getAllEvent));
-    ui[19].content.value.options = getAllEvent.map((item, index) => index + 1 + "　" + item.name);
+    ui[27].content.value.options = getAllEvent.map((item, index) => index + 1 + "　" + item.name);
 
-    warning("发送成功！", 20);
+    warning("发送成功！", 28);
   } catch (error) {
     console.error(error);
-    warning(error, 20);
+    warning(error, 28);
   }
 }
 
 async function ChangeEvent() {
-  if (index == "") {
-    warning("请选择你要修改的事件！", 15);
+  if (index === "") {
+    warning("请选择你要修改的事件！", 23);
     return;
   }
   if (event1.name == "") {
-    warning("事件名称不能为空", 15);
+    warning("事件名称不能为空", 23);
     return;
   } else if (!dayjs(event1.time, "YYYY-MM-DD", true).isValid()) {
-    warning("请输入正确的时间格式", 15);
+    warning("请输入正确的时间格式", 23);
     return;
   }
 
@@ -522,14 +673,14 @@ async function ChangeEvent() {
     const app = appList.find((app) => app.package_name == "com.yzf.daymatter");
     await AstroBox.thirdpartyapp.launchQA(app, "/pages/index");
     if (!app) {
-      warning("请先安装倒数日快应用", 15);
+      warning("请先安装倒数日快应用", 23);
       return;
-    } else if (app.version_code < 10300) {
-      warning("请先安装倒数日快应用的新版本！", 15);
+    } else if (app.version_code < 10400) {
+      warning("请先安装倒数日快应用的新版本！", 23);
       return;
     }
 
-    await warning("正在发送，请稍等···", 15);
+    await warning("正在发送，请稍等···", 23);
 
     await AstroBox.interconnect.sendQAICMessage(
       "com.yzf.daymatter",
@@ -537,28 +688,29 @@ async function ChangeEvent() {
         type: "changeEvent",
         name: event1.name,
         date: event1.time,
-        on_index: true,
+        on_index: event1.on_index,
+        IFStaringDay: event1.IFStaringDay,
         index: index,
       })
     );
 
     getAllEvent[index].name = event1.name;
     getAllEvent[index].date = event1.time;
-    ui[10].content.value.options[index] = index + 1 + "　" + event1.name;
+    ui[14].content.value.options[index] = index + 1 + "　" + event1.name;
 
-    warning("发送成功！", 15);
+    warning("发送成功！", 23);
   } catch (error) {
     console.error(error);
-    warning(error, 15);
+    warning(error, 23);
   }
 }
 
 async function getEvent() {
   let id;
   if (!whoGetEvent) {
-    id = 15;
+    id = 23;
   } else {
-    id = 20;
+    id = 28;
   }
   try {
     const appList = await AstroBox.thirdpartyapp.getThirdPartyAppList();
@@ -567,7 +719,7 @@ async function getEvent() {
     if (!app) {
       warning("请先安装倒数日快应用", id);
       return;
-    } else if (app.version_code < 10300) {
+    } else if (app.version_code < 10400) {
       warning("请先安装倒数日快应用的新版本！", id);
       return;
     }
@@ -592,14 +744,14 @@ AstroBox.event.addEventListener("onQAICMessage_com.yzf.daymatter", (data) => {
   getAllEvent = datas.data;
   let names = datas.data.map((item, index) => index + 1 + "　" + item.name);
   if (!whoGetEvent) {
-    ui[10].content.value.options = names;
-    ui[16].visibility = false;
-    ui[17].visibility = true;
-    warning("获取手环端数据成功！", 15);
+    ui[14].content.value.options = names;
+    ui[24].visibility = false;
+    ui[25].visibility = true;
+    warning("获取手环端数据成功！", 23);
   } else {
-    ui[19].content.value.options = names;
-    ui[21].visibility = false;
-    ui[22].visibility = true;
-    warning("获取手环端数据成功！", 20);
+    ui[27].content.value.options = names;
+    ui[29].visibility = false;
+    ui[30].visibility = true;
+    warning("获取手环端数据成功！", 28);
   }
 });

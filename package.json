@@ -12,7 +12,7 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "astrobox-plugin-sdk": "^1.1.4",
+    "astrobox-plugin-sdk": "^1.1.6",
     "dayjs": "^1.11.13"
   }
 }
