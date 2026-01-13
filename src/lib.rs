@@ -42,12 +42,12 @@ impl event::Guest for MyPlugin {
 
     fn on_ui_event(
         event_id: _rt::String,
-        event: event::Event,
+        event_type: event::Event,
         _event_payload: _rt::String,
     ) -> wit_bindgen::rt::async_support::FutureReader<_rt::String> {
         let (writer, reader) = wit_future::new::<String>(|| "".to_string());
 
-        ui::ui_event_processor(event, &event_id);
+        ui::ui_event_processor(event_type, &event_id);
 
         wit_bindgen::spawn(async move {
             let _ = writer.write("".to_string()).await;
@@ -68,8 +68,11 @@ impl event::Guest for MyPlugin {
         reader
     }
 
-    fn on_card_render(_card_id: _rt::String) -> wit_bindgen::rt::async_support::FutureReader<()> {
+    fn on_card_render(card_id: _rt::String) -> wit_bindgen::rt::async_support::FutureReader<()> {
         let (writer, reader) = wit_future::new::<()>(|| ());
+
+        // 这里可以实现卡片渲染逻辑
+        tracing::info!("Card render requested for: {}", card_id);
 
         wit_bindgen::spawn(async move {
             let _ = writer.write(()).await;
