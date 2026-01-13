@@ -1,13 +1,13 @@
 {
-    "name": "Blank Template",
+    "name": "倒数日配置工具",
     "icon": "icon.png",
-    "version": "1.0.0",
-    "description": "一个示例 AstroBox 插件",
-    "author": "AstroBox Team",
-    "website": "https://example.com",
-    "entry": "astrobox_ng_plugin_template_rust.wasm",
+    "version": "2.0",
+    "description": "在AstroBox中快速添加和修改倒数日相关信息",
+    "author": "小鱼yuzifu",
+    "website": "https://github.com/sf-yuzifu/Daymatter-AstroBox-Plugin",
+    "entry": "daymatter_astrobox_v2_plugin.wasm",
     "wasi_version": 2,
     "api_level": 2,
-    "permissions": ["network"],
+    "permissions": ["interconnect", "ui", "thirdpartyapp"],
     "additional_files": []
 }

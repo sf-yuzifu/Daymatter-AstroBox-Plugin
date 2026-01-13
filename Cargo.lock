@@ -21,19 +21,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
-name = "astrobox-ng-plugin-template-rust"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "waki",
- "wit-bindgen 0.47.0",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -65,6 +52,19 @@ name = "crossbeam-utils"
 version = "0.8.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
+
+[[package]]
+name = "daymatter_astrobox_v2_plugin"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "waki",
+ "wit-bindgen 0.47.0",
+]
 
 [[package]]
 name = "deranged"
