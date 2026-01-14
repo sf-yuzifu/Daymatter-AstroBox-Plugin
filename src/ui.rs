@@ -547,8 +547,8 @@ fn build_modify_event_ui(state: &UiState) -> ui::Element {
     let select_event_label = ui::Element::new(ui::ElementType::P, Some("在这里选择你要修改的事件"))
         .size(16)
         .margin_bottom(8);
-    let select_event_dropdown = ui::Element::new(ui::ElementType::Button, Some("选择事件"))
-        .on(ui::Event::Click, SELECT_EVENT_DROPDOWN_EVENT)
+    let select_event_dropdown = ui::Element::new(ui::ElementType::Select, Some("选择事件"))
+        .on(ui::Event::Change, SELECT_EVENT_DROPDOWN_EVENT)
         .radius(8)
         .padding(12)
         .bg("#2A2A2D")
@@ -734,8 +734,8 @@ fn build_delete_event_ui(state: &UiState) -> ui::Element {
     let select_event_label = ui::Element::new(ui::ElementType::P, Some("在这里选择你要删除的事件"))
         .size(16)
         .margin_bottom(8);
-    let select_event_dropdown = ui::Element::new(ui::ElementType::Button, Some("选择事件"))
-        .on(ui::Event::Click, SELECT_EVENT_DROPDOWN_EVENT)
+    let select_event_dropdown = ui::Element::new(ui::ElementType::Select, Some("选择事件"))
+        .on(ui::Event::Change, SELECT_EVENT_DROPDOWN_EVENT)
         .radius(8)
         .padding(12)
         .bg("#2A2A2D")
