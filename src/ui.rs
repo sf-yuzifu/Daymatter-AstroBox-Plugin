@@ -1,5 +1,6 @@
 use crate::astrobox::psys_host::{self, ui};
 use std::sync::{OnceLock, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // 事件类型枚举
 #[derive(Clone, Copy, PartialEq)]
@@ -10,12 +11,23 @@ pub enum EventType {
 }
 
 // 事件数据结构
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct EventData {
     name: String,
     time: String,
     on_index: bool,
     if_staring_day: bool,
+}
+
+impl Default for EventData {
+    fn default() -> Self {
+        EventData {
+            name: String::new(),
+            time: get_current_date(),
+            on_index: false,
+            if_staring_day: false,
+        }
+    }
 }
 
 // UI状态管理
@@ -27,6 +39,7 @@ struct UiState {
     all_events: Vec<(String, String)>, // (event_name, event_date)
     selected_event_index: Option<usize>,
     hovered_button: Option<String>, // 跟踪当前悬停的按钮
+    error_message: Option<String>, // 错误提示消息
 }
 
 static UI_STATE: OnceLock<RwLock<UiState>> = OnceLock::new();
@@ -37,10 +50,16 @@ fn ui_state() -> &'static RwLock<UiState> {
             root_element_id: None,
             current_tab: EventType::AddEvent,
             event_data: EventData::default(),
-            modify_event_data: EventData::default(),
+            modify_event_data: EventData {
+                name: String::new(),
+                time: String::new(),
+                on_index: false,
+                if_staring_day: false,
+            },
             all_events: Vec::new(),
             selected_event_index: None,
             hovered_button: None,
+            error_message: None,
         })
     })
 }
@@ -71,19 +90,146 @@ pub const SELECT_EVENT_DROPDOWN_EVENT: &str = "select_event_dropdown";
 pub const TAB_ADD_EVENT: &str = "tab_add_event";
 pub const TAB_MODIFY_EVENT: &str = "tab_modify_event";
 pub const TAB_DELETE_EVENT: &str = "tab_delete_event";
+pub const HIDE_ERROR_EVENT: &str = "hide_error";
 
-// 标签页切换处理
-fn handle_tab_change(_event: &str, value: &str) {
-    let mut state = ui_state()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+// 日期验证错误类型
+#[derive(Debug)]
+enum DateValidationError {
+    Empty,
+    InvalidFormat,
+    InvalidYear,
+    InvalidMonth,
+    InvalidDay,
+}
 
-    state.current_tab = match value {
-        "添加事件" => EventType::AddEvent,
-        "修改事件" => EventType::ModifyEvent,
-        "删除事件" => EventType::DeleteEvent,
-        _ => EventType::AddEvent,
+impl std::fmt::Display for DateValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DateValidationError::Empty => write!(f, "时间不能为空"),
+            DateValidationError::InvalidFormat => write!(f, "时间格式必须为 YYYY-MM-DD"),
+            DateValidationError::InvalidYear => write!(f, "年份必须在 1-9999 之间"),
+            DateValidationError::InvalidMonth => write!(f, "月份必须在 1-12 之间"),
+            DateValidationError::InvalidDay => write!(f, "日期无效"),
+        }
+    }
+}
+
+// 验证时间格式 YYYY-MM-DD，返回具体的错误信息
+fn validate_date_format(date_str: &str) -> Result<(), DateValidationError> {
+    if date_str.is_empty() {
+        return Err(DateValidationError::Empty);
+    }
+
+    if date_str.len() != 10 {
+        return Err(DateValidationError::InvalidFormat);
+    }
+
+    let chars: Vec<char> = date_str.chars().collect();
+
+    if chars[4] != '-' || chars[7] != '-' {
+        return Err(DateValidationError::InvalidFormat);
+    }
+
+    let year_str = &date_str[0..4];
+    let month_str = &date_str[5..7];
+    let day_str = &date_str[8..10];
+
+    let year: u32 = match year_str.parse() {
+        Ok(y) => y,
+        Err(_) => return Err(DateValidationError::InvalidFormat),
     };
+
+    let month: u32 = match month_str.parse() {
+        Ok(m) => m,
+        Err(_) => return Err(DateValidationError::InvalidFormat),
+    };
+
+    let day: u32 = match day_str.parse() {
+        Ok(d) => d,
+        Err(_) => return Err(DateValidationError::InvalidFormat),
+    };
+
+    if year < 1 || year > 9999 {
+        return Err(DateValidationError::InvalidYear);
+    }
+
+    if month < 1 || month > 12 {
+        return Err(DateValidationError::InvalidMonth);
+    }
+
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => return Err(DateValidationError::InvalidMonth),
+    };
+
+    if day < 1 || day > days_in_month {
+        return Err(DateValidationError::InvalidDay);
+    }
+
+    Ok(())
+}
+
+fn is_leap_year(year: u32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+// 获取当前日期并格式化为 YYYY-MM-DD
+fn get_current_date() -> String {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::from_secs(0));
+
+    let total_seconds = duration.as_secs();
+    let total_days = total_seconds / 86400;
+
+    // 1970-01-01 是 Unix 纪元
+    let mut year = 1970;
+    let mut remaining_days = total_days;
+
+    while remaining_days > 0 {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if remaining_days >= days_in_year {
+            remaining_days -= days_in_year;
+            year += 1;
+        } else {
+            break;
+        }
+    }
+
+    let mut month = 1;
+    let mut day = remaining_days + 1;
+
+    while month <= 12 {
+        let days_in_month = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 => {
+                if is_leap_year(year) {
+                    29
+                } else {
+                    28
+                }
+            }
+            _ => break,
+        };
+
+        if day > days_in_month {
+            day -= days_in_month;
+            month += 1;
+        } else {
+            break;
+        }
+    }
+
+    format!("{:04}-{:02}-{:02}", year, month, day)
 }
 
 // 输入事件处理
@@ -92,18 +238,29 @@ fn handle_input_event(event: &str, value: &str) {
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
+    let parsed_value = if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
+        json.get("value")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        value.to_string()
+    };
+
     match event {
         EVENT_NAME_INPUT_EVENT => {
-            state.event_data.name = value.to_string();
+            state.event_data.name = parsed_value;
+            state.error_message = None;
         }
         EVENT_TIME_INPUT_EVENT => {
-            state.event_data.time = value.to_string();
+            state.event_data.time = parsed_value;
+            state.error_message = None;
         }
         MODIFY_EVENT_NAME_INPUT_EVENT => {
-            state.modify_event_data.name = value.to_string();
+            state.modify_event_data.name = parsed_value;
         }
         MODIFY_EVENT_TIME_INPUT_EVENT => {
-            state.modify_event_data.time = value.to_string();
+            state.modify_event_data.time = parsed_value;
         }
         _ => {
             tracing::info!("未处理的事件类型");
@@ -117,23 +274,32 @@ fn handle_dropdown_event(event: &str, value: &str) {
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
+    let parsed_value = if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
+        json.get("value")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        value.to_string()
+    };
+
     match event {
         ON_INDEX_CHANGE_EVENT => {
-            state.event_data.on_index = value == "是";
+            state.event_data.on_index = parsed_value == "是";
         }
         IF_STARING_DAY_CHANGE_EVENT => {
-            state.event_data.if_staring_day = value == "是";
+            state.event_data.if_staring_day = parsed_value == "是";
         }
         MODIFY_ON_INDEX_CHANGE_EVENT => {
-            state.modify_event_data.on_index = value == "是";
+            state.modify_event_data.on_index = parsed_value == "是";
         }
         MODIFY_IF_STARING_DAY_CHANGE_EVENT => {
-            state.modify_event_data.if_staring_day = value == "是";
+            state.modify_event_data.if_staring_day = parsed_value == "是";
         }
         SELECT_EVENT_DROPDOWN_EVENT => {
             // 解析选择的事件索引
-            if let Some(space_idx) = value.find("　") {
-                if let Ok(index) = value[..space_idx].parse::<usize>() {
+            if let Some(space_idx) = parsed_value.find("　") {
+                if let Ok(index) = parsed_value[..space_idx].parse::<usize>() {
                     state.selected_event_index = Some(index - 1);
                     // 加载选中事件的数据
                     let event_data = state.all_events.get(index - 1).cloned();
@@ -152,28 +318,112 @@ fn handle_dropdown_event(event: &str, value: &str) {
 fn handle_button_click(event: &str) {
     match event {
         ADD_EVENT_BUTTON_EVENT => {
-            // 添加事件逻辑
-            tracing::info!(
-                "添加事件: {:?}",
-                ui_state()
+            let (event_name, event_time) = {
+                let state = ui_state()
                     .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .event_data
-            );
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                (state.event_data.name.clone(), state.event_data.time.clone())
+            };
+
+            let error_message = if event_name.is_empty() {
+                Some("事件名称不能为空".to_string())
+            } else if let Err(err) = validate_date_format(&event_time) {
+                Some(err.to_string())
+            } else {
+                None
+            };
+
+            if let Some(msg) = error_message {
+                let root_id: Option<String>;
+                {
+                    let mut state = ui_state()
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.error_message = Some(msg);
+                    root_id = state.root_element_id.clone();
+                }
+                if let Some(root_id) = root_id {
+                    let ui = build_main_ui();
+                    psys_host::ui::render(&root_id, ui);
+                }
+            } else {
+                let root_id: Option<String>;
+                {
+                    let mut state = ui_state()
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.error_message = None;
+                    root_id = state.root_element_id.clone();
+                }
+                if let Some(root_id) = root_id {
+                    let ui = build_main_ui();
+                    psys_host::ui::render(&root_id, ui);
+                }
+
+                tracing::info!(
+                    "添加事件: {:?}",
+                    ui_state()
+                        .read()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .event_data
+                );
+            }
         }
         GET_EVENTS_BUTTON_EVENT => {
             // 获取事件列表逻辑
             tracing::info!("获取手环端数据");
         }
         CHANGE_EVENT_BUTTON_EVENT => {
-            // 修改事件逻辑
-            tracing::info!(
-                "修改事件: {:?}",
-                ui_state()
+            let (event_name, event_time) = {
+                let state = ui_state()
                     .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .modify_event_data
-            );
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                (state.modify_event_data.name.clone(), state.modify_event_data.time.clone())
+            };
+
+            let error_message = if event_name.is_empty() {
+                Some("事件名称不能为空".to_string())
+            } else if let Err(err) = validate_date_format(&event_time) {
+                Some(err.to_string())
+            } else {
+                None
+            };
+
+            if let Some(msg) = error_message {
+                let root_id: Option<String>;
+                {
+                    let mut state = ui_state()
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.error_message = Some(msg);
+                    root_id = state.root_element_id.clone();
+                }
+                if let Some(root_id) = root_id {
+                    let ui = build_main_ui();
+                    psys_host::ui::render(&root_id, ui);
+                }
+            } else {
+                let root_id: Option<String>;
+                {
+                    let mut state = ui_state()
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.error_message = None;
+                    root_id = state.root_element_id.clone();
+                }
+                if let Some(root_id) = root_id {
+                    let ui = build_main_ui();
+                    psys_host::ui::render(&root_id, ui);
+                }
+
+                tracing::info!(
+                    "修改事件: {:?}",
+                    ui_state()
+                        .read()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .modify_event_data
+                );
+            }
         }
         DELETE_EVENT_BUTTON_EVENT => {
             // 删除事件逻辑
@@ -184,6 +434,21 @@ fn handle_button_click(event: &str) {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .selected_event_index
             );
+        }
+        HIDE_ERROR_EVENT => {
+            // 隐藏错误提示
+            let root_id: Option<String>;
+            {
+                let mut state = ui_state()
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.error_message = None;
+                root_id = state.root_element_id.clone();
+            }
+            if let Some(root_id) = root_id {
+                let ui = build_main_ui();
+                psys_host::ui::render(&root_id, ui);
+            }
         }
         TAB_ADD_EVENT => {
             // 切换到添加事件标签页
@@ -364,19 +629,21 @@ fn handle_button_click(event: &str) {
 }
 
 // 事件处理器
-pub fn ui_event_processor(evtype: ui::Event, event: &str) {
+pub fn ui_event_processor(evtype: ui::Event, event: &str, event_payload: &str) {
     // 输出事件类型的原始字符串表示
     let evtype_str = format!("{:?}", evtype);
-    tracing::info!("接收到事件: 类型={}, 名称={}", evtype_str, event);
+    tracing::info!("接收到事件: 类型={}, 名称={}, 载荷={}", evtype_str, event, event_payload);
     match evtype {
         ui::Event::Click => {
             handle_button_click(event);
         }
         ui::Event::Change => {
             // 处理输入和下拉菜单的变化
-            // 注意：这里需要获取实际的输入值，当前接口可能无法直接获取
-            // 实际实现中可能需要通过其他方式获取输入值
-            tracing::info!("Change event: {}", event);
+            if event.starts_with("event_") || event.starts_with("modify_") {
+                handle_input_event(event, event_payload);
+            } else {
+                handle_dropdown_event(event, event_payload);
+            }
         }
         _ => {}
     }
@@ -787,6 +1054,21 @@ pub fn build_main_ui() -> ui::Element {
         .width_full()
         .padding(20);
 
+    // 错误提示元素
+    let error_element = if let Some(ref msg) = state.error_message {
+        Some(
+            ui::Element::new(ui::ElementType::Div, None)
+                .bg("#FF4444")
+                .radius(8)
+                .padding(12)
+                .margin_bottom(20)
+                .on(ui::Event::Click, HIDE_ERROR_EVENT)
+                .child(ui::Element::new(ui::ElementType::P, Some(msg)).size(14).text_color("#FFFFFF")),
+        )
+    } else {
+        None
+    };
+
     // 为了让标签页容器居中，我们可以在它外面再包裹一层容器
     let tabs_wrapper = ui::Element::new(ui::ElementType::Div, None)
         .flex()
@@ -852,8 +1134,6 @@ pub fn build_main_ui() -> ui::Element {
     let content_container = ui::Element::new(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Column)
-        .margin_left(10)
-        .margin_right(10)
         .padding_top(20)
         .padding_bottom(20);
 
@@ -868,6 +1148,12 @@ pub fn build_main_ui() -> ui::Element {
     let tabs_wrapper = tabs_wrapper.child(tabs);
 
     // 组合主界面
+    let mut main_container = main_container;
+
+    if let Some(error) = error_element {
+        main_container = main_container.child(error);
+    }
+
     main_container
         .child(tabs_wrapper)
         .child(content_container.child(content))
