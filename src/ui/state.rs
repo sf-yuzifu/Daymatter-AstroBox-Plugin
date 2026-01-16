@@ -1,5 +1,5 @@
 use std::sync::{OnceLock, RwLock};
-use chrono::{Datelike, Local};
+use chrono::{Datelike, Utc};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventType {
@@ -95,7 +95,14 @@ pub const TAB_MODIFY_EVENT: &str = "tab_modify_event";
 pub const TAB_DELETE_EVENT: &str = "tab_delete_event";
 
 pub fn get_current_date() -> String {
-    let now = Local::now();
-    tracing::info!("now: {:?}", now);
-    format!("{:04}-{:02}-{:02}", now.year(), now.month(), now.day())
+    let utc_now = Utc::now();
+    
+    let timezone_offset_minutes = wit_bindgen::block_on(async {
+        crate::astrobox::psys_host::os::timezone_offset_minutes().await
+    });
+    
+    let local_now = utc_now.with_timezone(&chrono::FixedOffset::east_opt(timezone_offset_minutes * 60).unwrap());
+    tracing::info!("local_now: {:?}", local_now);
+    format!("{:04}-{:02}-{:02}", local_now.year(), local_now.month(), local_now.day())
 }
+ 
