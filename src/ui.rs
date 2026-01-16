@@ -68,6 +68,7 @@ pub fn handle_interconnect_message(payload: &str) {
                         state.all_events = all_events;
                         state.has_fetched_events = true;
                         state.error_message = Some("获取手环端数据成功！".to_string());
+                        state.is_success_message = true;
                         tracing::info!(
                             "更新状态: all_events.len={}, error_message={:?}",
                             state.all_events.len(),
@@ -159,6 +160,7 @@ struct UiState {
     has_fetched_events: bool,            // 是否已经获取了手环端数据
     hovered_button: Option<String>,      // 跟踪当前悬停的按钮
     error_message: Option<String>,       // 错误提示消息
+    is_success_message: bool,             // 是否为成功消息（用于区分颜色）
 }
 
 static UI_STATE: OnceLock<RwLock<UiState>> = OnceLock::new();
@@ -181,6 +183,7 @@ fn ui_state() -> &'static RwLock<UiState> {
             has_fetched_events: false,
             hovered_button: None,
             error_message: None,
+            is_success_message: false,
         })
     })
 }
@@ -481,6 +484,7 @@ fn handle_button_click(event: &str) {
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     state.error_message = Some(msg);
+                    state.is_success_message = false;
                     root_id = state.root_element_id.clone();
                 }
                 if let Some(root_id) = root_id {
@@ -515,6 +519,7 @@ fn handle_button_click(event: &str) {
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     state.error_message = Some("正在发送，请稍等···".to_string());
+                    state.is_success_message = false;
                     root_id = state.root_element_id.clone();
                 }
                 if let Some(root_id) = root_id {
@@ -552,12 +557,13 @@ fn handle_button_click(event: &str) {
                                 } else {
                                     let root_id: Option<String>;
                                     {
-                                        let mut state = ui_state()
-                                            .write()
-                                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                        state.error_message =
-                                            Some("请先安装倒数日快应用的新版本！".to_string());
-                                        root_id = state.root_element_id.clone();
+                                    let mut state = ui_state()
+                                        .write()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    state.error_message =
+                                        Some("请先安装倒数日快应用的新版本！".to_string());
+                                    state.is_success_message = false;
+                                    root_id = state.root_element_id.clone();
                                     }
                                     if let Some(root_id) = root_id {
                                         let ui = build_main_ui();
@@ -572,6 +578,7 @@ fn handle_button_click(event: &str) {
                                         .write()
                                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                                     state.error_message = Some("请先安装倒数日快应用".to_string());
+                                    state.is_success_message = false;
                                     root_id = state.root_element_id.clone();
                                 }
                                 if let Some(root_id) = root_id {
@@ -587,6 +594,7 @@ fn handle_button_click(event: &str) {
                                     .write()
                                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                                 state.error_message = Some("获取应用列表失败".to_string());
+                                state.is_success_message = false;
                                 root_id = state.root_element_id.clone();
                             }
                             if let Some(root_id) = root_id {
@@ -620,6 +628,7 @@ fn handle_button_click(event: &str) {
                                         .write()
                                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                                     state.error_message = Some("发送成功！".to_string());
+                                    state.is_success_message = true;
                                     root_id = state.root_element_id.clone();
                                 }
                                 if let Some(root_id) = root_id {
@@ -633,6 +642,7 @@ fn handle_button_click(event: &str) {
                                         .write()
                                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                                     state.error_message = Some("发送失败，请重试".to_string());
+                                    state.is_success_message = false;
                                     root_id = state.root_element_id.clone();
                                 }
                                 if let Some(root_id) = root_id {
@@ -646,9 +656,10 @@ fn handle_button_click(event: &str) {
                         {
                             let mut state = ui_state()
                                 .write()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            state.error_message = Some("未找到设备".to_string());
-                            root_id = state.root_element_id.clone();
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        state.error_message = Some("未找到设备".to_string());
+                        state.is_success_message = false;
+                        root_id = state.root_element_id.clone();
                         }
                         if let Some(root_id) = root_id {
                             let ui = build_main_ui();
@@ -665,6 +676,7 @@ fn handle_button_click(event: &str) {
                     .write()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 state.error_message = Some("正在发送，请稍等···".to_string());
+                state.is_success_message = false;
                 root_id = state.root_element_id.clone();
             }
             if let Some(root_id) = root_id {
@@ -702,6 +714,7 @@ fn handle_button_click(event: &str) {
                                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                                     state.error_message =
                                         Some("请先安装倒数日快应用的新版本！".to_string());
+                                    state.is_success_message = false;
                                     root_id = state.root_element_id.clone();
                                 }
                                 if let Some(root_id) = root_id {
@@ -717,6 +730,7 @@ fn handle_button_click(event: &str) {
                                     .write()
                                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                                 state.error_message = Some("请先安装倒数日快应用".to_string());
+                                state.is_success_message = false;
                                 root_id = state.root_element_id.clone();
                             }
                             if let Some(root_id) = root_id {
@@ -732,6 +746,7 @@ fn handle_button_click(event: &str) {
                                 .write()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
                             state.error_message = Some("获取应用列表失败".to_string());
+                            state.is_success_message = false;
                             root_id = state.root_element_id.clone();
                         }
                         if let Some(root_id) = root_id {
@@ -759,6 +774,7 @@ fn handle_button_click(event: &str) {
                                     .write()
                                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                                 state.error_message = Some("获取手环端数据成功！".to_string());
+                                state.is_success_message = true;
                                 root_id = state.root_element_id.clone();
                             }
                             if let Some(root_id) = root_id {
@@ -787,6 +803,7 @@ fn handle_button_click(event: &str) {
                             .write()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         state.error_message = Some("未找到设备".to_string());
+                        state.is_success_message = false;
                         root_id = state.root_element_id.clone();
                     }
                     if let Some(root_id) = root_id {
@@ -827,6 +844,7 @@ fn handle_button_click(event: &str) {
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     state.error_message = Some(msg);
+                    state.is_success_message = false;
                     root_id = state.root_element_id.clone();
                 }
                 if let Some(root_id) = root_id {
@@ -862,6 +880,7 @@ fn handle_button_click(event: &str) {
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     state.error_message = Some("正在发送，请稍等···".to_string());
+                    state.is_success_message = false;
                     root_id = state.root_element_id.clone();
                 }
                 if let Some(root_id) = root_id {
@@ -921,6 +940,7 @@ fn handle_button_click(event: &str) {
                                         .write()
                                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                                     state.error_message = Some("请先安装倒数日快应用".to_string());
+                                    state.is_success_message = false;
                                     root_id = state.root_element_id.clone();
                                 }
                                 if let Some(root_id) = root_id {
@@ -936,6 +956,7 @@ fn handle_button_click(event: &str) {
                                     .write()
                                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                                 state.error_message = Some("获取应用列表失败".to_string());
+                                state.is_success_message = false;
                                 root_id = state.root_element_id.clone();
                             }
                             if let Some(root_id) = root_id {
@@ -970,6 +991,7 @@ fn handle_button_click(event: &str) {
                                         .write()
                                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                                     state.error_message = Some("发送成功！".to_string());
+                                    state.is_success_message = true;
                                     // 更新 all_events 中对应的事件数据
                                     if let Some(index) = state.selected_event_index {
                                         if let Some(event) = state.all_events.get_mut(index) {
@@ -995,6 +1017,7 @@ fn handle_button_click(event: &str) {
                                         .write()
                                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                                     state.error_message = Some("发送失败，请重试".to_string());
+                                    state.is_success_message = false;
                                     root_id = state.root_element_id.clone();
                                 }
                                 if let Some(root_id) = root_id {
@@ -1010,6 +1033,7 @@ fn handle_button_click(event: &str) {
                                 .write()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
                             state.error_message = Some("未找到设备".to_string());
+                            state.is_success_message = false;
                             root_id = state.root_element_id.clone();
                         }
                         if let Some(root_id) = root_id {
@@ -1041,6 +1065,7 @@ fn handle_button_click(event: &str) {
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     state.error_message = Some(msg);
+                    state.is_success_message = false;
                     root_id = state.root_element_id.clone();
                 }
                 if let Some(root_id) = root_id {
@@ -1054,6 +1079,7 @@ fn handle_button_click(event: &str) {
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     state.error_message = Some("正在发送，请稍等···".to_string());
+                    state.is_success_message = false;
                     root_id = state.root_element_id.clone();
                 }
                 if let Some(root_id) = root_id {
@@ -1108,6 +1134,7 @@ fn handle_button_click(event: &str) {
                                         .write()
                                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                                     state.error_message = Some("请先安装倒数日快应用".to_string());
+                                    state.is_success_message = false;
                                     root_id = state.root_element_id.clone();
                                 }
                                 if let Some(root_id) = root_id {
@@ -1123,6 +1150,7 @@ fn handle_button_click(event: &str) {
                                     .write()
                                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                                 state.error_message = Some("获取应用列表失败".to_string());
+                                state.is_success_message = false;
                                 root_id = state.root_element_id.clone();
                             }
                             if let Some(root_id) = root_id {
@@ -1153,6 +1181,7 @@ fn handle_button_click(event: &str) {
                                         .write()
                                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                                     state.error_message = Some("发送成功！".to_string());
+                                    state.is_success_message = true;
                                     // 从 all_events 中移除该事件
                                     if let Some(index) = state.selected_event_index {
                                         state.all_events.remove(index);
@@ -1188,6 +1217,7 @@ fn handle_button_click(event: &str) {
                                 .write()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
                             state.error_message = Some("未找到设备".to_string());
+                            state.is_success_message = false;
                             root_id = state.root_element_id.clone();
                         }
                         if let Some(root_id) = root_id {
@@ -1994,9 +2024,14 @@ pub fn build_main_ui() -> ui::Element {
 
     // 错误提示元素
     let error_element = if let Some(ref msg) = state.error_message {
+        let bg_color = if state.is_success_message {
+            "#4CAF50" // 绿色用于成功消息
+        } else {
+            "#FF4444" // 红色用于错误消息
+        };
         Some(
             ui::Element::new(ui::ElementType::Div, None)
-                .bg("#FF4444")
+                .bg(bg_color)
                 .radius(8)
                 .padding(12)
                 .margin_bottom(20)
