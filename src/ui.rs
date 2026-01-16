@@ -1021,14 +1021,182 @@ fn handle_button_click(event: &str) {
             }
         }
         DELETE_EVENT_BUTTON_EVENT => {
-            // 删除事件逻辑
-            tracing::info!(
-                "删除事件: {:?}",
-                ui_state()
+            let selected_index = {
+                let state = ui_state()
                     .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .selected_event_index
-            );
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.selected_event_index
+            };
+
+            let error_message = if selected_index.is_none() {
+                Some("请选择你要删除的事件！".to_string())
+            } else {
+                None
+            };
+
+            if let Some(msg) = error_message {
+                let root_id: Option<String>;
+                {
+                    let mut state = ui_state()
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.error_message = Some(msg);
+                    root_id = state.root_element_id.clone();
+                }
+                if let Some(root_id) = root_id {
+                    let ui = build_main_ui();
+                    psys_host::ui::render(&root_id, ui);
+                }
+            } else {
+                let root_id: Option<String>;
+                {
+                    let mut state = ui_state()
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.error_message = Some("正在发送，请稍等···".to_string());
+                    root_id = state.root_element_id.clone();
+                }
+                if let Some(root_id) = root_id {
+                    let ui = build_main_ui();
+                    psys_host::ui::render(&root_id, ui);
+                }
+
+                let index_clone = selected_index.unwrap_or(0);
+
+                wit_bindgen::block_on(async move {
+                    let device_list = device::get_connected_device_list().await;
+                    if let Some(device) = device_list.first() {
+                        tracing::info!("device: {:?}", device_list);
+                        let device_addr = device.addr.clone();
+                        tracing::info!("device_addr: {:?}", device_addr);
+
+                        let mut should_send_message = false;
+
+                        let app_list = thirdpartyapp::get_thirdparty_app_list(&device_addr).await;
+
+                        if let Ok(apps) = app_list {
+                            tracing::info!("app: {:?}", apps);
+                            let app = apps.iter().find(|app: &&thirdpartyapp::AppInfo| {
+                                app.package_name == "com.yzf.daymatter"
+                            });
+                            if let Some(app) = app {
+                                if app.version_code >= 10400 {
+                                    let _ =
+                                        thirdpartyapp::launch_qa(&device_addr, app, "/index").await;
+                                    std::thread::sleep(Duration::from_secs(2));
+                                    should_send_message = true;
+                                } else {
+                                    let root_id: Option<String>;
+                                    {
+                                        let mut state = ui_state()
+                                            .write()
+                                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                        state.error_message =
+                                            Some("请先安装倒数日快应用的新版本！".to_string());
+                                        root_id = state.root_element_id.clone();
+                                    }
+                                    if let Some(root_id) = root_id {
+                                        let ui = build_main_ui();
+                                        psys_host::ui::render(&root_id, ui);
+                                    }
+                                    return;
+                                }
+                            } else {
+                                let root_id: Option<String>;
+                                {
+                                    let mut state = ui_state()
+                                        .write()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    state.error_message = Some("请先安装倒数日快应用".to_string());
+                                    root_id = state.root_element_id.clone();
+                                }
+                                if let Some(root_id) = root_id {
+                                    let ui = build_main_ui();
+                                    psys_host::ui::render(&root_id, ui);
+                                }
+                                return;
+                            }
+                        } else {
+                            let root_id: Option<String>;
+                            {
+                                let mut state = ui_state()
+                                    .write()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                state.error_message = Some("获取应用列表失败".to_string());
+                                root_id = state.root_element_id.clone();
+                            }
+                            if let Some(root_id) = root_id {
+                                let ui = build_main_ui();
+                                psys_host::ui::render(&root_id, ui);
+                            }
+                            return;
+                        }
+
+                        if should_send_message {
+                            ensure_interconnect_registered(&device_addr).await;
+
+                            let payload = format!(
+                                r#"{{"type":"deleteEvent","index":{}}}"#,
+                                index_clone
+                            );
+
+                            let result = interconnect::send_qaic_message(
+                                &device_addr,
+                                "com.yzf.daymatter",
+                                &payload,
+                            )
+                            .await;
+                            if let Ok(_) = result {
+                                let root_id: Option<String>;
+                                {
+                                    let mut state = ui_state()
+                                        .write()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    state.error_message = Some("发送成功！".to_string());
+                                    // 从 all_events 中移除该事件
+                                    if let Some(index) = state.selected_event_index {
+                                        state.all_events.remove(index);
+                                        // 清空选中的事件
+                                        state.selected_event_index = None;
+                                        state.selected_event_name = None;
+                                    }
+                                    root_id = state.root_element_id.clone();
+                                }
+                                if let Some(root_id) = root_id {
+                                    let ui = build_main_ui();
+                                    psys_host::ui::render(&root_id, ui);
+                                }
+                            } else {
+                                let root_id: Option<String>;
+                                {
+                                    let mut state = ui_state()
+                                        .write()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    state.error_message = Some("发送失败，请重试".to_string());
+                                    root_id = state.root_element_id.clone();
+                                }
+                                if let Some(root_id) = root_id {
+                                    let ui = build_main_ui();
+                                    psys_host::ui::render(&root_id, ui);
+                                }
+                            }
+                        }
+                    } else {
+                        let root_id: Option<String>;
+                        {
+                            let mut state = ui_state()
+                                .write()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            state.error_message = Some("未找到设备".to_string());
+                            root_id = state.root_element_id.clone();
+                        }
+                        if let Some(root_id) = root_id {
+                            let ui = build_main_ui();
+                            psys_host::ui::render(&root_id, ui);
+                        }
+                    }
+                });
+            }
         }
         HIDE_ERROR_EVENT => {
             // 隐藏错误提示
@@ -1728,7 +1896,12 @@ fn build_delete_event_ui(state: &UiState) -> ui::Element {
     let select_event_label = ui::Element::new(ui::ElementType::P, Some("在这里选择你要删除的事件"))
         .size(16)
         .margin_bottom(8);
-    let select_event_dropdown = ui::Element::new(ui::ElementType::Select, Some("选择事件"))
+    let select_event_text = if state.selected_event_name.is_some() {
+        state.selected_event_name.as_deref().unwrap_or("")
+    } else {
+        "选择事件"
+    };
+    let mut select_event_dropdown = ui::Element::new(ui::ElementType::Select, Some(select_event_text))
         .on(ui::Event::Change, SELECT_EVENT_DROPDOWN_EVENT)
         .radius(8)
         .padding(12)
@@ -1736,10 +1909,17 @@ fn build_delete_event_ui(state: &UiState) -> ui::Element {
         .width_full()
         .margin_bottom(8);
 
-    // 按钮组容器
-    let button_group = ui::Element::new(ui::ElementType::Div, None)
-        .flex()
-        .flex_direction(ui::FlexDirection::Column);
+    // 动态添加事件选项
+    if state.all_events.is_empty() {
+        let option = ui::Element::new(ui::ElementType::Option, Some("选择事件"));
+        select_event_dropdown = select_event_dropdown.child(option);
+    } else {
+        for (index, event_data) in state.all_events.iter().enumerate() {
+            let option_text = format!("{}　{}", index + 1, event_data.name);
+            let option = ui::Element::new(ui::ElementType::Option, Some(&option_text));
+            select_event_dropdown = select_event_dropdown.child(option);
+        }
+    }
 
     // 获取事件按钮
     let get_events_button = ui::Element::new(ui::ElementType::Button, Some("获取手环端数据"))
@@ -1748,7 +1928,7 @@ fn build_delete_event_ui(state: &UiState) -> ui::Element {
         .on(ui::Event::MouseEnter, GET_EVENTS_BUTTON_EVENT)
         .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
         .radius(8)
-        .padding(12)
+        .padding(14)
         .bg(
             if state.hovered_button.as_deref() == Some(GET_EVENTS_BUTTON_EVENT) {
                 "#4b4b4b"
@@ -1776,6 +1956,19 @@ fn build_delete_event_ui(state: &UiState) -> ui::Element {
         )
         .width_full();
 
+    // 根据状态决定显示哪个按钮
+    let button_group = if state.has_fetched_events {
+        ui::Element::new(ui::ElementType::Div, None)
+            .flex()
+            .flex_direction(ui::FlexDirection::Column)
+            .child(delete_button)
+    } else {
+        ui::Element::new(ui::ElementType::Div, None)
+            .flex()
+            .flex_direction(ui::FlexDirection::Column)
+            .child(get_events_button)
+    };
+
     // 组合删除事件界面
     container
         .child(
@@ -1783,7 +1976,7 @@ fn build_delete_event_ui(state: &UiState) -> ui::Element {
                 .child(select_event_label)
                 .child(select_event_dropdown),
         )
-        .child(button_group.child(get_events_button).child(delete_button))
+        .child(button_group)
 }
 
 // 构建主界面
