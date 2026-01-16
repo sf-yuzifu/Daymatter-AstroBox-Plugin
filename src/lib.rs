@@ -7,7 +7,6 @@ use crate::exports::astrobox::psys_plugin::{
 
 pub mod logger;
 pub mod ui;
-pub mod resources;
 
 wit_bindgen::generate!({
     path: "wit",
