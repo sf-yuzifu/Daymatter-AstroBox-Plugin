@@ -24,14 +24,16 @@ impl event::Guest for MyPlugin {
 
         match event_type {
             EventType::PluginMessage => {}
-            EventType::InterconnectMessage => {}
+            EventType::InterconnectMessage => {
+                ui::handle_interconnect_message(&event_payload);
+            }
             EventType::DeviceAction => {}
             EventType::ProviderAction => {}
             EventType::DeeplinkAction => {}
             EventType::TransportPacket => {}
         };
 
-        tracing::info!("event_payload: {}", event_payload);
+        tracing::info!("event_type: {:?}, event_payload: {}", event_type, event_payload);
 
         wit_bindgen::spawn(async move {
             let _ = writer.write("".to_string()).await;

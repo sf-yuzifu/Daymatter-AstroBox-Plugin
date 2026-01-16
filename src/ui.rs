@@ -1,6 +1,123 @@
 use crate::astrobox::psys_host::{self, device, interconnect, thirdpartyapp, ui};
+use serde_json::Value;
 use std::sync::{OnceLock, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+// 处理从手环端接收到的消息
+pub fn handle_interconnect_message(payload: &str) {
+    tracing::info!("收到手环端消息: {}", payload);
+
+    if let Ok(json) = serde_json::from_str::<Value>(payload) {
+        // 尝试从 payloadText 字段获取数据
+        let data_json = if let Some(payload_text) = json.get("payloadText").and_then(|v| v.as_str())
+        {
+            tracing::info!("从 payloadText 解析数据");
+            payload_text
+        } else {
+            tracing::info!("直接使用 payload 解析数据");
+            payload
+        };
+
+        if let Ok(data_json) = serde_json::from_str::<Value>(data_json) {
+            if let Some(data) = data_json.get("data") {
+                if let Some(events_array) = data.as_array() {
+                    tracing::info!("解析到 {} 个事件", events_array.len());
+                    let mut all_events = Vec::new();
+                    for event in events_array {
+                        if let Some(event_obj) = event.as_object() {
+                            let name = event_obj
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let date = event_obj
+                                .get("date")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let on_index = event_obj
+                                .get("on_index")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let if_staring_day = event_obj
+                                .get("IFStaringDay")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+
+                            tracing::info!(
+                                "事件: name={}, date={}, on_index={}, if_staring_day={}",
+                                name,
+                                date,
+                                on_index,
+                                if_staring_day
+                            );
+                            all_events.push(EventData {
+                                name,
+                                time: date,
+                                on_index,
+                                if_staring_day,
+                            });
+                        }
+                    }
+
+                    let root_id: Option<String>;
+                    {
+                        let mut state = ui_state()
+                            .write()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        state.all_events = all_events;
+                        state.has_fetched_events = true;
+                        state.error_message = Some("获取手环端数据成功！".to_string());
+                        tracing::info!(
+                            "更新状态: all_events.len={}, error_message={:?}",
+                            state.all_events.len(),
+                            state.error_message
+                        );
+                        root_id = state.root_element_id.clone();
+                        tracing::info!("root_element_id: {:?}", root_id);
+                    }
+                    if let Some(root_id) = root_id {
+                        let ui = build_main_ui();
+                        psys_host::ui::render(&root_id, ui);
+                        tracing::info!("UI已重新渲染");
+                    } else {
+                        tracing::warn!("root_element_id 为 None，无法重新渲染UI");
+                    }
+                } else {
+                    tracing::warn!("data 不是数组");
+                }
+            } else {
+                tracing::warn!("JSON 中没有 data 字段");
+            }
+        } else {
+            tracing::warn!("JSON 解析失败");
+        }
+    } else {
+        tracing::warn!("JSON 解析失败");
+    }
+}
+
+// 确保已注册接收 Interconnect 消息
+async fn ensure_interconnect_registered(device_addr: &str) {
+    use crate::astrobox::psys_host::register;
+
+    let result = register::register_interconnect_recv(device_addr, "com.yzf.daymatter").await;
+    match result {
+        Ok(_) => {
+            tracing::info!(
+                "成功注册接收倒数日应用的 Interconnect 消息: {}",
+                device_addr
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "注册接收倒数日应用的 Interconnect 消息失败: {:?}, 设备: {}",
+                e,
+                device_addr
+            );
+        }
+    }
+}
 
 // 事件类型枚举
 #[derive(Clone, Copy, PartialEq)]
@@ -11,7 +128,7 @@ pub enum EventType {
 }
 
 // 事件数据结构
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct EventData {
     name: String,
     time: String,
@@ -36,10 +153,12 @@ struct UiState {
     current_tab: EventType,
     event_data: EventData,
     modify_event_data: EventData,
-    all_events: Vec<(String, String)>, // (event_name, event_date)
+    all_events: Vec<EventData>, // 存储所有事件的完整数据
     selected_event_index: Option<usize>,
-    hovered_button: Option<String>, // 跟踪当前悬停的按钮
-    error_message: Option<String>,  // 错误提示消息
+    selected_event_name: Option<String>, // 保存选中的事件名称
+    has_fetched_events: bool,            // 是否已经获取了手环端数据
+    hovered_button: Option<String>,      // 跟踪当前悬停的按钮
+    error_message: Option<String>,       // 错误提示消息
 }
 
 static UI_STATE: OnceLock<RwLock<UiState>> = OnceLock::new();
@@ -58,6 +177,8 @@ fn ui_state() -> &'static RwLock<UiState> {
             },
             all_events: Vec::new(),
             selected_event_index: None,
+            selected_event_name: None,
+            has_fetched_events: false,
             hovered_button: None,
             error_message: None,
         })
@@ -271,47 +392,61 @@ fn handle_input_event(event: &str, value: &str) {
 
 // 下拉菜单事件处理
 fn handle_dropdown_event(event: &str, value: &str) {
-    let mut state = ui_state()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root_id: Option<String>;
+    {
+        let mut state = ui_state()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let parsed_value = if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
-        json.get("value")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    } else {
-        value.to_string()
-    };
+        let parsed_value = if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
+            json.get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            value.to_string()
+        };
 
-    match event {
-        ON_INDEX_CHANGE_EVENT => {
-            state.event_data.on_index = parsed_value == "是";
-        }
-        IF_STARING_DAY_CHANGE_EVENT => {
-            state.event_data.if_staring_day = parsed_value == "是";
-        }
-        MODIFY_ON_INDEX_CHANGE_EVENT => {
-            state.modify_event_data.on_index = parsed_value == "是";
-        }
-        MODIFY_IF_STARING_DAY_CHANGE_EVENT => {
-            state.modify_event_data.if_staring_day = parsed_value == "是";
-        }
-        SELECT_EVENT_DROPDOWN_EVENT => {
-            // 解析选择的事件索引
-            if let Some(space_idx) = parsed_value.find("　") {
-                if let Ok(index) = parsed_value[..space_idx].parse::<usize>() {
-                    state.selected_event_index = Some(index - 1);
-                    // 加载选中事件的数据
-                    let event_data = state.all_events.get(index - 1).cloned();
-                    if let Some((name, time)) = event_data {
-                        state.modify_event_data.name = name;
-                        state.modify_event_data.time = time;
+        root_id = state.root_element_id.clone();
+
+        match event {
+            ON_INDEX_CHANGE_EVENT => {
+                state.event_data.on_index = parsed_value == "是";
+            }
+            IF_STARING_DAY_CHANGE_EVENT => {
+                state.event_data.if_staring_day = parsed_value == "是";
+            }
+            MODIFY_ON_INDEX_CHANGE_EVENT => {
+                state.modify_event_data.on_index = parsed_value == "是";
+            }
+            MODIFY_IF_STARING_DAY_CHANGE_EVENT => {
+                state.modify_event_data.if_staring_day = parsed_value == "是";
+            }
+            SELECT_EVENT_DROPDOWN_EVENT => {
+                // 解析选择的事件索引
+                if let Some(space_idx) = parsed_value.find("　") {
+                    if let Ok(index) = parsed_value[..space_idx].parse::<usize>() {
+                        state.selected_event_index = Some(index - 1);
+                        // 加载选中事件的数据
+                        if let Some(event_data) = state.all_events.get(index - 1).cloned() {
+                            state.modify_event_data.name = event_data.name.clone();
+                            state.modify_event_data.time = event_data.time;
+                            state.modify_event_data.on_index = event_data.on_index;
+                            state.modify_event_data.if_staring_day = event_data.if_staring_day;
+                            // 保存选中的事件名称（包含索引）
+                            state.selected_event_name = Some(parsed_value);
+                        }
                     }
                 }
             }
+            _ => {}
         }
-        _ => {}
+    }
+
+    // 重新渲染 UI（在锁释放后）
+    if let Some(root_id) = root_id {
+        let ui = build_main_ui();
+        psys_host::ui::render(&root_id, ui);
     }
 }
 
@@ -410,7 +545,8 @@ fn handle_button_click(event: &str) {
                             });
                             if let Some(app) = app {
                                 if app.version_code >= 10400 {
-                                    let _ = thirdpartyapp::launch_qa(&device_addr, app, "/index").await;
+                                    let _ =
+                                        thirdpartyapp::launch_qa(&device_addr, app, "/index").await;
                                     std::thread::sleep(Duration::from_secs(2));
                                     should_send_message = true;
                                 } else {
@@ -461,6 +597,8 @@ fn handle_button_click(event: &str) {
                         }
 
                         if should_send_message {
+                            ensure_interconnect_registered(&device_addr).await;
+
                             let payload = format!(
                                 r#"{{"type":"addEvent","name":"{}","date":"{}","on_index":{},"IFStaringDay":{}}}"#,
                                 event_name_clone,
@@ -521,21 +659,160 @@ fn handle_button_click(event: &str) {
             }
         }
         GET_EVENTS_BUTTON_EVENT => {
-            // 获取事件列表逻辑
-            tracing::info!("获取手环端数据");
+            let root_id: Option<String>;
+            {
+                let mut state = ui_state()
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.error_message = Some("正在发送，请稍等···".to_string());
+                root_id = state.root_element_id.clone();
+            }
+            if let Some(root_id) = root_id {
+                let ui = build_main_ui();
+                psys_host::ui::render(&root_id, ui);
+            }
+
+            wit_bindgen::block_on(async move {
+                let device_list = device::get_connected_device_list().await;
+                if let Some(device) = device_list.first() {
+                    tracing::info!("device: {:?}", device_list);
+                    let device_addr = device.addr.clone();
+                    tracing::info!("device_addr: {:?}", device_addr);
+
+                    let mut should_send_message = false;
+
+                    let app_list = thirdpartyapp::get_thirdparty_app_list(&device_addr).await;
+
+                    if let Ok(apps) = app_list {
+                        tracing::info!("app: {:?}", apps);
+                        let app = apps.iter().find(|app: &&thirdpartyapp::AppInfo| {
+                            app.package_name == "com.yzf.daymatter"
+                        });
+                        if let Some(app) = app {
+                            if app.version_code >= 10400 {
+                                let _ = thirdpartyapp::launch_qa(&device_addr, app, "/pages/index")
+                                    .await;
+                                std::thread::sleep(Duration::from_secs(2));
+                                should_send_message = true;
+                            } else {
+                                let root_id: Option<String>;
+                                {
+                                    let mut state = ui_state()
+                                        .write()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    state.error_message =
+                                        Some("请先安装倒数日快应用的新版本！".to_string());
+                                    root_id = state.root_element_id.clone();
+                                }
+                                if let Some(root_id) = root_id {
+                                    let ui = build_main_ui();
+                                    psys_host::ui::render(&root_id, ui);
+                                }
+                                return;
+                            }
+                        } else {
+                            let root_id: Option<String>;
+                            {
+                                let mut state = ui_state()
+                                    .write()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                state.error_message = Some("请先安装倒数日快应用".to_string());
+                                root_id = state.root_element_id.clone();
+                            }
+                            if let Some(root_id) = root_id {
+                                let ui = build_main_ui();
+                                psys_host::ui::render(&root_id, ui);
+                            }
+                            return;
+                        }
+                    } else {
+                        let root_id: Option<String>;
+                        {
+                            let mut state = ui_state()
+                                .write()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            state.error_message = Some("获取应用列表失败".to_string());
+                            root_id = state.root_element_id.clone();
+                        }
+                        if let Some(root_id) = root_id {
+                            let ui = build_main_ui();
+                            psys_host::ui::render(&root_id, ui);
+                        }
+                        return;
+                    }
+
+                    if should_send_message {
+                        ensure_interconnect_registered(&device_addr).await;
+
+                        let payload = r#"{"type":"getAllEvent"}"#;
+
+                        let result = interconnect::send_qaic_message(
+                            &device_addr,
+                            "com.yzf.daymatter",
+                            &payload,
+                        )
+                        .await;
+                        if let Ok(_) = result {
+                            let root_id: Option<String>;
+                            {
+                                let mut state = ui_state()
+                                    .write()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                state.error_message = Some("获取手环端数据成功！".to_string());
+                                root_id = state.root_element_id.clone();
+                            }
+                            if let Some(root_id) = root_id {
+                                let ui = build_main_ui();
+                                psys_host::ui::render(&root_id, ui);
+                            }
+                        } else {
+                            let root_id: Option<String>;
+                            {
+                                let mut state = ui_state()
+                                    .write()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                state.error_message = Some("发送失败，请重试".to_string());
+                                root_id = state.root_element_id.clone();
+                            }
+                            if let Some(root_id) = root_id {
+                                let ui = build_main_ui();
+                                psys_host::ui::render(&root_id, ui);
+                            }
+                        }
+                    }
+                } else {
+                    let root_id: Option<String>;
+                    {
+                        let mut state = ui_state()
+                            .write()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        state.error_message = Some("未找到设备".to_string());
+                        root_id = state.root_element_id.clone();
+                    }
+                    if let Some(root_id) = root_id {
+                        let ui = build_main_ui();
+                        psys_host::ui::render(&root_id, ui);
+                    }
+                }
+            });
         }
         CHANGE_EVENT_BUTTON_EVENT => {
-            let (event_name, event_time) = {
+            let (event_name, event_time, on_index, if_staring_day, selected_index) = {
                 let state = ui_state()
                     .read()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 (
                     state.modify_event_data.name.clone(),
                     state.modify_event_data.time.clone(),
+                    state.modify_event_data.on_index,
+                    state.modify_event_data.if_staring_day,
+                    state.selected_event_index,
                 )
             };
 
-            let error_message = if event_name.is_empty() {
+            let error_message = if selected_index.is_none() {
+                Some("请选择你要修改的事件！".to_string())
+            } else if event_name.is_empty() {
                 Some("事件名称不能为空".to_string())
             } else if let Err(err) = validate_date_format(&event_time) {
                 Some(err.to_string())
@@ -571,12 +848,176 @@ fn handle_button_click(event: &str) {
                 }
 
                 tracing::info!(
-                    "修改事件: {:?}",
-                    ui_state()
-                        .read()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .modify_event_data
+                    "修改事件: name={}, time={}, on_index={}, if_staring_day={}, index={:?}",
+                    event_name,
+                    event_time,
+                    on_index,
+                    if_staring_day,
+                    selected_index
                 );
+
+                let root_id: Option<String>;
+                {
+                    let mut state = ui_state()
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.error_message = Some("正在发送，请稍等···".to_string());
+                    root_id = state.root_element_id.clone();
+                }
+                if let Some(root_id) = root_id {
+                    let ui = build_main_ui();
+                    psys_host::ui::render(&root_id, ui);
+                }
+
+                let event_name_clone = event_name.clone();
+                let event_time_clone = event_time.clone();
+                let on_index_clone = on_index;
+                let if_staring_day_clone = if_staring_day;
+                let index_clone = selected_index.unwrap_or(0);
+
+                wit_bindgen::block_on(async move {
+                    let device_list = device::get_connected_device_list().await;
+                    if let Some(device) = device_list.first() {
+                        tracing::info!("device: {:?}", device_list);
+                        let device_addr = device.addr.clone();
+                        tracing::info!("device_addr: {:?}", device_addr);
+
+                        let mut should_send_message = false;
+
+                        let app_list = thirdpartyapp::get_thirdparty_app_list(&device_addr).await;
+
+                        if let Ok(apps) = app_list {
+                            tracing::info!("app: {:?}", apps);
+                            let app = apps.iter().find(|app: &&thirdpartyapp::AppInfo| {
+                                app.package_name == "com.yzf.daymatter"
+                            });
+                            if let Some(app) = app {
+                                if app.version_code >= 10400 {
+                                    let _ =
+                                        thirdpartyapp::launch_qa(&device_addr, app, "/pages/index")
+                                            .await;
+                                    std::thread::sleep(Duration::from_secs(2));
+                                    should_send_message = true;
+                                } else {
+                                    let root_id: Option<String>;
+                                    {
+                                        let mut state = ui_state()
+                                            .write()
+                                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                        state.error_message =
+                                            Some("请先安装倒数日快应用的新版本！".to_string());
+                                        root_id = state.root_element_id.clone();
+                                    }
+                                    if let Some(root_id) = root_id {
+                                        let ui = build_main_ui();
+                                        psys_host::ui::render(&root_id, ui);
+                                    }
+                                    return;
+                                }
+                            } else {
+                                let root_id: Option<String>;
+                                {
+                                    let mut state = ui_state()
+                                        .write()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    state.error_message = Some("请先安装倒数日快应用".to_string());
+                                    root_id = state.root_element_id.clone();
+                                }
+                                if let Some(root_id) = root_id {
+                                    let ui = build_main_ui();
+                                    psys_host::ui::render(&root_id, ui);
+                                }
+                                return;
+                            }
+                        } else {
+                            let root_id: Option<String>;
+                            {
+                                let mut state = ui_state()
+                                    .write()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                state.error_message = Some("获取应用列表失败".to_string());
+                                root_id = state.root_element_id.clone();
+                            }
+                            if let Some(root_id) = root_id {
+                                let ui = build_main_ui();
+                                psys_host::ui::render(&root_id, ui);
+                            }
+                            return;
+                        }
+
+                        if should_send_message {
+                            ensure_interconnect_registered(&device_addr).await;
+
+                            let payload = format!(
+                                r#"{{"type":"changeEvent","name":"{}","date":"{}","on_index":{},"IFStaringDay":{},"index":{}}}"#,
+                                event_name_clone,
+                                event_time_clone,
+                                on_index_clone,
+                                if_staring_day_clone,
+                                index_clone
+                            );
+
+                            let result = interconnect::send_qaic_message(
+                                &device_addr,
+                                "com.yzf.daymatter",
+                                &payload,
+                            )
+                            .await;
+                            if let Ok(_) = result {
+                                let root_id: Option<String>;
+                                {
+                                    let mut state = ui_state()
+                                        .write()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    state.error_message = Some("发送成功！".to_string());
+                                    // 更新 all_events 中对应的事件数据
+                                    if let Some(index) = state.selected_event_index {
+                                        if let Some(event) = state.all_events.get_mut(index) {
+                                            event.name = event_name_clone.clone();
+                                            event.time = event_time_clone.clone();
+                                            event.on_index = on_index_clone;
+                                            event.if_staring_day = if_staring_day_clone;
+                                        }
+                                        // 更新选中的事件名称
+                                        state.selected_event_name =
+                                            Some(format!("{}　{}", index + 1, event_name_clone));
+                                    }
+                                    root_id = state.root_element_id.clone();
+                                }
+                                if let Some(root_id) = root_id {
+                                    let ui = build_main_ui();
+                                    psys_host::ui::render(&root_id, ui);
+                                }
+                            } else {
+                                let root_id: Option<String>;
+                                {
+                                    let mut state = ui_state()
+                                        .write()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    state.error_message = Some("发送失败，请重试".to_string());
+                                    root_id = state.root_element_id.clone();
+                                }
+                                if let Some(root_id) = root_id {
+                                    let ui = build_main_ui();
+                                    psys_host::ui::render(&root_id, ui);
+                                }
+                            }
+                        }
+                    } else {
+                        let root_id: Option<String>;
+                        {
+                            let mut state = ui_state()
+                                .write()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            state.error_message = Some("未找到设备".to_string());
+                            root_id = state.root_element_id.clone();
+                        }
+                        if let Some(root_id) = root_id {
+                            let ui = build_main_ui();
+                            psys_host::ui::render(&root_id, ui);
+                        }
+                    }
+                });
             }
         }
         DELETE_EVENT_BUTTON_EVENT => {
@@ -1038,13 +1479,31 @@ fn build_modify_event_ui(state: &UiState) -> ui::Element {
     let select_event_label = ui::Element::new(ui::ElementType::P, Some("在这里选择你要修改的事件"))
         .size(16)
         .margin_bottom(8);
-    let select_event_dropdown = ui::Element::new(ui::ElementType::Select, Some("选择事件"))
-        .on(ui::Event::Change, SELECT_EVENT_DROPDOWN_EVENT)
-        .radius(8)
-        .padding(12)
-        .bg("#2A2A2A")
-        .width_full()
-        .margin_bottom(8);
+    let select_event_text = if state.selected_event_name.is_some() {
+        state.selected_event_name.as_deref().unwrap_or("")
+    } else {
+        "选择事件"
+    };
+    let mut select_event_dropdown =
+        ui::Element::new(ui::ElementType::Select, Some(select_event_text))
+            .on(ui::Event::Change, SELECT_EVENT_DROPDOWN_EVENT)
+            .radius(8)
+            .padding(12)
+            .bg("#2A2A2A")
+            .width_full()
+            .margin_bottom(8);
+
+    // 动态添加事件选项
+    if state.all_events.is_empty() {
+        let option = ui::Element::new(ui::ElementType::Option, Some("选择事件"));
+        select_event_dropdown = select_event_dropdown.child(option);
+    } else {
+        for (index, event_data) in state.all_events.iter().enumerate() {
+            let option_text = format!("{}　{}", index + 1, event_data.name);
+            let option = ui::Element::new(ui::ElementType::Option, Some(&option_text));
+            select_event_dropdown = select_event_dropdown.child(option);
+        }
+    }
 
     // 事件名称输入
     let event_name_label = ui::Element::new(ui::ElementType::P, Some("输入事件名称"))
@@ -1179,11 +1638,6 @@ fn build_modify_event_ui(state: &UiState) -> ui::Element {
             "#2A2A2A"
         });
 
-    // 按钮组容器
-    let button_group = ui::Element::new(ui::ElementType::Div, None)
-        .flex()
-        .flex_direction(ui::FlexDirection::Column);
-
     // 获取事件按钮
     let get_events_button = ui::Element::new(ui::ElementType::Button, Some("获取手环端数据"))
         .without_default_styles()
@@ -1191,7 +1645,7 @@ fn build_modify_event_ui(state: &UiState) -> ui::Element {
         .on(ui::Event::MouseEnter, GET_EVENTS_BUTTON_EVENT)
         .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
         .radius(8)
-        .padding(12)
+        .padding(14)
         .bg(
             if state.hovered_button.as_deref() == Some(GET_EVENTS_BUTTON_EVENT) {
                 "#4b4b4b"
@@ -1218,6 +1672,19 @@ fn build_modify_event_ui(state: &UiState) -> ui::Element {
             },
         )
         .width_full();
+
+    // 根据状态决定显示哪个按钮
+    let button_group = if state.has_fetched_events {
+        ui::Element::new(ui::ElementType::Div, None)
+            .flex()
+            .flex_direction(ui::FlexDirection::Column)
+            .child(sync_button)
+    } else {
+        ui::Element::new(ui::ElementType::Div, None)
+            .flex()
+            .flex_direction(ui::FlexDirection::Column)
+            .child(get_events_button)
+    };
 
     // 组合修改事件界面
     container
@@ -1248,7 +1715,7 @@ fn build_modify_event_ui(state: &UiState) -> ui::Element {
                     .child(if_staring_day_no),
             ),
         )
-        .child(button_group.child(get_events_button).child(sync_button))
+        .child(button_group)
 }
 
 // 构建删除事件界面
