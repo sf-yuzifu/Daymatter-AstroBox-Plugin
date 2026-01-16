@@ -1,6 +1,7 @@
 use crate::astrobox::psys_host::{self, ui};
 use super::state::{ui_state, EventType, UiState};
 use super::event_handler::{EVENT_NAME_INPUT_EVENT, EVENT_TIME_INPUT_EVENT, ON_INDEX_YES_EVENT, ON_INDEX_NO_EVENT, IF_STARING_DAY_YES_EVENT, IF_STARING_DAY_NO_EVENT, ADD_EVENT_BUTTON_EVENT, BUTTON_MOUSE_LEAVE, MODIFY_EVENT_NAME_INPUT_EVENT, MODIFY_EVENT_TIME_INPUT_EVENT, MODIFY_ON_INDEX_YES_EVENT, MODIFY_ON_INDEX_NO_EVENT, MODIFY_IF_STARING_DAY_YES_EVENT, MODIFY_IF_STARING_DAY_NO_EVENT, GET_EVENTS_BUTTON_EVENT, CHANGE_EVENT_BUTTON_EVENT, DELETE_EVENT_BUTTON_EVENT, SELECT_EVENT_DROPDOWN_EVENT, TAB_ADD_EVENT, TAB_MODIFY_EVENT, TAB_DELETE_EVENT, HIDE_ERROR_EVENT};
+use super::message::check_and_hide_message;
 
 pub fn build_add_event_ui(state: &UiState) -> ui::Element {
     let container = ui::Element::new(ui::ElementType::Div, None)
@@ -640,4 +641,6 @@ pub fn render_main_ui(element_id: &str) {
     state.root_element_id = Some(element_id.to_string());
     drop(state);
     psys_host::ui::render(element_id, build_main_ui());
+    
+    check_and_hide_message();
 }

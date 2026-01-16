@@ -1,5 +1,5 @@
 use crate::astrobox::psys_host::{self, device, interconnect, register, thirdpartyapp};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use super::state::*;
 use super::build::build_main_ui;
 
@@ -11,11 +11,51 @@ pub fn show_message(msg: &str, is_success: bool) {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.error_message = Some(msg.to_string());
         state.is_success_message = is_success;
+        state.message_show_time = Some(SystemTime::now());
         root_id = state.root_element_id.clone();
     }
     if let Some(root_id) = root_id {
         let ui = build_main_ui();
         psys_host::ui::render(&root_id, ui);
+    }
+}
+
+pub fn check_and_hide_message() {
+    let should_hide = {
+        let state = ui_state()
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        
+        if let Some(show_time) = state.message_show_time {
+            if let Ok(elapsed) = show_time.elapsed() {
+                if elapsed >= Duration::from_secs(3) {
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
+    
+    if should_hide {
+        let root_id: Option<String>;
+        {
+            let mut state = ui_state()
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.error_message = None;
+            state.message_show_time = None;
+            root_id = state.root_element_id.clone();
+        }
+        
+        if let Some(root_id) = root_id {
+            let ui = build_main_ui();
+            psys_host::ui::render(&root_id, ui);
+        }
     }
 }
 

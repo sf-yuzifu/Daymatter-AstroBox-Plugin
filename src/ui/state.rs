@@ -1,4 +1,5 @@
 use std::sync::{OnceLock, RwLock};
+use std::time::SystemTime;
 use chrono::{Datelike, Utc};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +40,7 @@ pub struct UiState {
     pub hovered_button: Option<String>,
     pub error_message: Option<String>,
     pub is_success_message: bool,
+    pub message_show_time: Option<SystemTime>,
 }
 
 static UI_STATE: OnceLock<RwLock<UiState>> = OnceLock::new();
@@ -62,6 +64,7 @@ pub fn ui_state() -> &'static RwLock<UiState> {
             hovered_button: None,
             error_message: None,
             is_success_message: false,
+            message_show_time: None,
         })
     })
 }
