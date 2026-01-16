@@ -385,7 +385,24 @@ fn handle_button_click(event: &str) {
                             );
 
                             if send_to_daymatter(&device_addr, &payload).await {
+                                let root_id: Option<String>;
+                                {
+                                    let mut state = ui_state()
+                                        .write()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    
+                                    state.all_events.clear();
+                                    state.has_fetched_events = false;
+                                    
+                                    root_id = state.root_element_id.clone();
+                                }
+                                
                                 show_success_message("发送成功！");
+                                
+                                if let Some(root_id) = root_id {
+                                    let ui = build_main_ui();
+                                    psys_host::ui::render(&root_id, ui);
+                                }
                             }
                         }
                     }
