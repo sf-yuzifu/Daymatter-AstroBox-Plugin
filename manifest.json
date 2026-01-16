@@ -8,6 +8,6 @@
     "entry": "daymatter_astrobox_v2_plugin.wasm",
     "wasi_version": 2,
     "api_level": 2,
-    "permissions": ["interconnect", "ui", "thirdpartyapp"],
+    "permissions": ["interconnect", "ui", "thirdpartyapp", "device"],
     "additional_files": []
 }

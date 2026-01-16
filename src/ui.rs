@@ -217,6 +217,85 @@ pub const TAB_DELETE_EVENT: &str = "tab_delete_event";
 pub const HIDE_ERROR_EVENT: &str = "hide_error";
 pub const BUTTON_MOUSE_LEAVE: &str = "button_mouse_leave";
 
+// 辅助函数：显示消息
+fn show_message(msg: &str, is_success: bool) {
+    let root_id: Option<String>;
+    {
+        let mut state = ui_state()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.error_message = Some(msg.to_string());
+        state.is_success_message = is_success;
+        root_id = state.root_element_id.clone();
+    }
+    if let Some(root_id) = root_id {
+        let ui = build_main_ui();
+        psys_host::ui::render(&root_id, ui);
+    }
+}
+
+fn show_error_message(msg: &str) {
+    show_message(msg, false);
+}
+
+fn show_success_message(msg: &str) {
+    show_message(msg, true);
+}
+
+// 辅助函数：检查设备并返回设备地址
+async fn check_device() -> Option<String> {
+    let device_list = device::get_connected_device_list().await;
+    if let Some(device) = device_list.first() {
+        tracing::info!("device: {:?}", device_list);
+        let device_addr = device.addr.clone();
+        tracing::info!("device_addr: {:?}", device_addr);
+        Some(device_addr)
+    } else {
+        show_error_message("未找到设备");
+        None
+    }
+}
+
+// 辅助函数：检查应用版本
+async fn check_app_version(device_addr: &str) -> bool {
+    let app_list = thirdpartyapp::get_thirdparty_app_list(device_addr).await;
+
+    if let Ok(apps) = app_list {
+        tracing::info!("app: {:?}", apps);
+        let app = apps.iter().find(|app: &&thirdpartyapp::AppInfo| {
+            app.package_name == "com.yzf.daymatter"
+        });
+        if let Some(app) = app {
+            if app.version_code >= 10400 {
+                let _ = thirdpartyapp::launch_qa(device_addr, app, "/index").await;
+                std::thread::sleep(Duration::from_secs(2));
+                true
+            } else {
+                show_error_message("请先安装倒数日快应用的新版本！");
+                false
+            }
+        } else {
+            show_error_message("请先安装倒数日快应用");
+            false
+        }
+    } else {
+        show_error_message("获取应用列表失败");
+        false
+    }
+}
+
+// 辅助函数：发送消息到倒数日应用
+async fn send_to_daymatter(device_addr: &str, payload: &str) -> bool {
+    ensure_interconnect_registered(device_addr).await;
+    let result = interconnect::send_qaic_message(device_addr, "com.yzf.daymatter", payload).await;
+    if let Ok(_) = result {
+        true
+    } else {
+        show_error_message("发送失败，请重试");
+        false
+    }
+}
+
 // 日期验证错误类型
 #[derive(Debug)]
 enum DateValidationError {
@@ -478,32 +557,14 @@ fn handle_button_click(event: &str) {
             };
 
             if let Some(msg) = error_message {
-                let root_id: Option<String>;
-                {
-                    let mut state = ui_state()
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state.error_message = Some(msg);
-                    state.is_success_message = false;
-                    root_id = state.root_element_id.clone();
-                }
-                if let Some(root_id) = root_id {
-                    let ui = build_main_ui();
-                    psys_host::ui::render(&root_id, ui);
-                }
+                show_error_message(&msg);
             } else {
-                let root_id: Option<String>;
-                {
-                    let mut state = ui_state()
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state.error_message = None;
-                    root_id = state.root_element_id.clone();
-                }
-                if let Some(root_id) = root_id {
-                    let ui = build_main_ui();
-                    psys_host::ui::render(&root_id, ui);
-                }
+                  {
+                      let mut state = ui_state()
+                          .write()
+                          .unwrap_or_else(|poisoned| poisoned.into_inner());
+                      state.error_message = None;
+                  }
 
                 tracing::info!(
                     "添加事件: name={}, time={}, on_index={}, if_staring_day={}",
@@ -513,19 +574,7 @@ fn handle_button_click(event: &str) {
                     if_staring_day
                 );
 
-                let root_id: Option<String>;
-                {
-                    let mut state = ui_state()
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state.error_message = Some("正在发送，请稍等···".to_string());
-                    state.is_success_message = false;
-                    root_id = state.root_element_id.clone();
-                }
-                if let Some(root_id) = root_id {
-                    let ui = build_main_ui();
-                    psys_host::ui::render(&root_id, ui);
-                }
+                show_message("正在发送，请稍等···", false);
 
                 let event_name_clone = event_name.clone();
                 let event_time_clone = event_time.clone();
@@ -533,282 +582,32 @@ fn handle_button_click(event: &str) {
                 let if_staring_day_clone = if_staring_day;
 
                 wit_bindgen::block_on(async move {
-                    let device_list = device::get_connected_device_list().await;
-                    if let Some(device) = device_list.first() {
-                        tracing::info!("device: {:?}", device_list);
-                        let device_addr = device.addr.clone();
-                        tracing::info!("device_addr: {:?}", device_addr);
-
-                        let mut should_send_message = false;
-
-                        let app_list = thirdpartyapp::get_thirdparty_app_list(&device_addr).await;
-
-                        if let Ok(apps) = app_list {
-                            tracing::info!("app: {:?}", apps);
-                            let app = apps.iter().find(|app: &&thirdpartyapp::AppInfo| {
-                                app.package_name == "com.yzf.daymatter"
-                            });
-                            if let Some(app) = app {
-                                if app.version_code >= 10400 {
-                                    let _ =
-                                        thirdpartyapp::launch_qa(&device_addr, app, "/index").await;
-                                    std::thread::sleep(Duration::from_secs(2));
-                                    should_send_message = true;
-                                } else {
-                                    let root_id: Option<String>;
-                                    {
-                                    let mut state = ui_state()
-                                        .write()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                    state.error_message =
-                                        Some("请先安装倒数日快应用的新版本！".to_string());
-                                    state.is_success_message = false;
-                                    root_id = state.root_element_id.clone();
-                                    }
-                                    if let Some(root_id) = root_id {
-                                        let ui = build_main_ui();
-                                        psys_host::ui::render(&root_id, ui);
-                                    }
-                                    return;
-                                }
-                            } else {
-                                let root_id: Option<String>;
-                                {
-                                    let mut state = ui_state()
-                                        .write()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                    state.error_message = Some("请先安装倒数日快应用".to_string());
-                                    state.is_success_message = false;
-                                    root_id = state.root_element_id.clone();
-                                }
-                                if let Some(root_id) = root_id {
-                                    let ui = build_main_ui();
-                                    psys_host::ui::render(&root_id, ui);
-                                }
-                                return;
-                            }
-                        } else {
-                            let root_id: Option<String>;
-                            {
-                                let mut state = ui_state()
-                                    .write()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                state.error_message = Some("获取应用列表失败".to_string());
-                                state.is_success_message = false;
-                                root_id = state.root_element_id.clone();
-                            }
-                            if let Some(root_id) = root_id {
-                                let ui = build_main_ui();
-                                psys_host::ui::render(&root_id, ui);
-                            }
-                            return;
-                        }
-
-                        if should_send_message {
-                            ensure_interconnect_registered(&device_addr).await;
-
+                    if let Some(device_addr) = check_device().await {
+                        if check_app_version(&device_addr).await {
                             let payload = format!(
                                 r#"{{"type":"addEvent","name":"{}","date":"{}","on_index":{},"IFStaringDay":{}}}"#,
-                                event_name_clone,
-                                event_time_clone,
-                                on_index_clone,
-                                if_staring_day_clone
+                                event_name_clone, event_time_clone, on_index_clone, if_staring_day_clone
                             );
 
-                            let result = interconnect::send_qaic_message(
-                                &device_addr,
-                                "com.yzf.daymatter",
-                                &payload,
-                            )
-                            .await;
-                            if let Ok(_) = result {
-                                let root_id: Option<String>;
-                                {
-                                    let mut state = ui_state()
-                                        .write()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                    state.error_message = Some("发送成功！".to_string());
-                                    state.is_success_message = true;
-                                    root_id = state.root_element_id.clone();
-                                }
-                                if let Some(root_id) = root_id {
-                                    let ui = build_main_ui();
-                                    psys_host::ui::render(&root_id, ui);
-                                }
-                            } else {
-                                let root_id: Option<String>;
-                                {
-                                    let mut state = ui_state()
-                                        .write()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                    state.error_message = Some("发送失败，请重试".to_string());
-                                    state.is_success_message = false;
-                                    root_id = state.root_element_id.clone();
-                                }
-                                if let Some(root_id) = root_id {
-                                    let ui = build_main_ui();
-                                    psys_host::ui::render(&root_id, ui);
-                                }
+                            if send_to_daymatter(&device_addr, &payload).await {
+                                show_success_message("发送成功！");
                             }
-                        }
-                    } else {
-                        let root_id: Option<String>;
-                        {
-                            let mut state = ui_state()
-                                .write()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        state.error_message = Some("未找到设备".to_string());
-                        state.is_success_message = false;
-                        root_id = state.root_element_id.clone();
-                        }
-                        if let Some(root_id) = root_id {
-                            let ui = build_main_ui();
-                            psys_host::ui::render(&root_id, ui);
                         }
                     }
                 });
             }
         }
         GET_EVENTS_BUTTON_EVENT => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.error_message = Some("正在发送，请稍等···".to_string());
-                state.is_success_message = false;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
+            show_message("正在发送，请稍等···", false);
 
             wit_bindgen::block_on(async move {
-                let device_list = device::get_connected_device_list().await;
-                if let Some(device) = device_list.first() {
-                    tracing::info!("device: {:?}", device_list);
-                    let device_addr = device.addr.clone();
-                    tracing::info!("device_addr: {:?}", device_addr);
-
-                    let mut should_send_message = false;
-
-                    let app_list = thirdpartyapp::get_thirdparty_app_list(&device_addr).await;
-
-                    if let Ok(apps) = app_list {
-                        tracing::info!("app: {:?}", apps);
-                        let app = apps.iter().find(|app: &&thirdpartyapp::AppInfo| {
-                            app.package_name == "com.yzf.daymatter"
-                        });
-                        if let Some(app) = app {
-                            if app.version_code >= 10400 {
-                                let _ = thirdpartyapp::launch_qa(&device_addr, app, "/pages/index")
-                                    .await;
-                                std::thread::sleep(Duration::from_secs(2));
-                                should_send_message = true;
-                            } else {
-                                let root_id: Option<String>;
-                                {
-                                    let mut state = ui_state()
-                                        .write()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                    state.error_message =
-                                        Some("请先安装倒数日快应用的新版本！".to_string());
-                                    state.is_success_message = false;
-                                    root_id = state.root_element_id.clone();
-                                }
-                                if let Some(root_id) = root_id {
-                                    let ui = build_main_ui();
-                                    psys_host::ui::render(&root_id, ui);
-                                }
-                                return;
-                            }
-                        } else {
-                            let root_id: Option<String>;
-                            {
-                                let mut state = ui_state()
-                                    .write()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                state.error_message = Some("请先安装倒数日快应用".to_string());
-                                state.is_success_message = false;
-                                root_id = state.root_element_id.clone();
-                            }
-                            if let Some(root_id) = root_id {
-                                let ui = build_main_ui();
-                                psys_host::ui::render(&root_id, ui);
-                            }
-                            return;
-                        }
-                    } else {
-                        let root_id: Option<String>;
-                        {
-                            let mut state = ui_state()
-                                .write()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            state.error_message = Some("获取应用列表失败".to_string());
-                            state.is_success_message = false;
-                            root_id = state.root_element_id.clone();
-                        }
-                        if let Some(root_id) = root_id {
-                            let ui = build_main_ui();
-                            psys_host::ui::render(&root_id, ui);
-                        }
-                        return;
-                    }
-
-                    if should_send_message {
-                        ensure_interconnect_registered(&device_addr).await;
-
+                if let Some(device_addr) = check_device().await {
+                    if check_app_version(&device_addr).await {
                         let payload = r#"{"type":"getAllEvent"}"#;
 
-                        let result = interconnect::send_qaic_message(
-                            &device_addr,
-                            "com.yzf.daymatter",
-                            &payload,
-                        )
-                        .await;
-                        if let Ok(_) = result {
-                            let root_id: Option<String>;
-                            {
-                                let mut state = ui_state()
-                                    .write()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                state.error_message = Some("获取手环端数据成功！".to_string());
-                                state.is_success_message = true;
-                                root_id = state.root_element_id.clone();
-                            }
-                            if let Some(root_id) = root_id {
-                                let ui = build_main_ui();
-                                psys_host::ui::render(&root_id, ui);
-                            }
-                        } else {
-                            let root_id: Option<String>;
-                            {
-                                let mut state = ui_state()
-                                    .write()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                state.error_message = Some("发送失败，请重试".to_string());
-                                root_id = state.root_element_id.clone();
-                            }
-                            if let Some(root_id) = root_id {
-                                let ui = build_main_ui();
-                                psys_host::ui::render(&root_id, ui);
-                            }
+                        if send_to_daymatter(&device_addr, &payload).await {
+                            show_success_message("获取手环端数据成功！");
                         }
-                    }
-                } else {
-                    let root_id: Option<String>;
-                    {
-                        let mut state = ui_state()
-                            .write()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        state.error_message = Some("未找到设备".to_string());
-                        state.is_success_message = false;
-                        root_id = state.root_element_id.clone();
-                    }
-                    if let Some(root_id) = root_id {
-                        let ui = build_main_ui();
-                        psys_host::ui::render(&root_id, ui);
                     }
                 }
             });
@@ -838,31 +637,13 @@ fn handle_button_click(event: &str) {
             };
 
             if let Some(msg) = error_message {
-                let root_id: Option<String>;
-                {
-                    let mut state = ui_state()
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state.error_message = Some(msg);
-                    state.is_success_message = false;
-                    root_id = state.root_element_id.clone();
-                }
-                if let Some(root_id) = root_id {
-                    let ui = build_main_ui();
-                    psys_host::ui::render(&root_id, ui);
-                }
+                show_error_message(&msg);
             } else {
-                let root_id: Option<String>;
                 {
                     let mut state = ui_state()
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     state.error_message = None;
-                    root_id = state.root_element_id.clone();
-                }
-                if let Some(root_id) = root_id {
-                    let ui = build_main_ui();
-                    psys_host::ui::render(&root_id, ui);
                 }
 
                 tracing::info!(
@@ -874,19 +655,7 @@ fn handle_button_click(event: &str) {
                     selected_index
                 );
 
-                let root_id: Option<String>;
-                {
-                    let mut state = ui_state()
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state.error_message = Some("正在发送，请稍等···".to_string());
-                    state.is_success_message = false;
-                    root_id = state.root_element_id.clone();
-                }
-                if let Some(root_id) = root_id {
-                    let ui = build_main_ui();
-                    psys_host::ui::render(&root_id, ui);
-                }
+                show_message("正在发送，请稍等···", false);
 
                 let event_name_clone = event_name.clone();
                 let event_time_clone = event_time.clone();
@@ -895,96 +664,14 @@ fn handle_button_click(event: &str) {
                 let index_clone = selected_index.unwrap_or(0);
 
                 wit_bindgen::block_on(async move {
-                    let device_list = device::get_connected_device_list().await;
-                    if let Some(device) = device_list.first() {
-                        tracing::info!("device: {:?}", device_list);
-                        let device_addr = device.addr.clone();
-                        tracing::info!("device_addr: {:?}", device_addr);
-
-                        let mut should_send_message = false;
-
-                        let app_list = thirdpartyapp::get_thirdparty_app_list(&device_addr).await;
-
-                        if let Ok(apps) = app_list {
-                            tracing::info!("app: {:?}", apps);
-                            let app = apps.iter().find(|app: &&thirdpartyapp::AppInfo| {
-                                app.package_name == "com.yzf.daymatter"
-                            });
-                            if let Some(app) = app {
-                                if app.version_code >= 10400 {
-                                    let _ =
-                                        thirdpartyapp::launch_qa(&device_addr, app, "/pages/index")
-                                            .await;
-                                    std::thread::sleep(Duration::from_secs(2));
-                                    should_send_message = true;
-                                } else {
-                                    let root_id: Option<String>;
-                                    {
-                                        let mut state = ui_state()
-                                            .write()
-                                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                        state.error_message =
-                                            Some("请先安装倒数日快应用的新版本！".to_string());
-                                        root_id = state.root_element_id.clone();
-                                    }
-                                    if let Some(root_id) = root_id {
-                                        let ui = build_main_ui();
-                                        psys_host::ui::render(&root_id, ui);
-                                    }
-                                    return;
-                                }
-                            } else {
-                                let root_id: Option<String>;
-                                {
-                                    let mut state = ui_state()
-                                        .write()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                    state.error_message = Some("请先安装倒数日快应用".to_string());
-                                    state.is_success_message = false;
-                                    root_id = state.root_element_id.clone();
-                                }
-                                if let Some(root_id) = root_id {
-                                    let ui = build_main_ui();
-                                    psys_host::ui::render(&root_id, ui);
-                                }
-                                return;
-                            }
-                        } else {
-                            let root_id: Option<String>;
-                            {
-                                let mut state = ui_state()
-                                    .write()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                state.error_message = Some("获取应用列表失败".to_string());
-                                state.is_success_message = false;
-                                root_id = state.root_element_id.clone();
-                            }
-                            if let Some(root_id) = root_id {
-                                let ui = build_main_ui();
-                                psys_host::ui::render(&root_id, ui);
-                            }
-                            return;
-                        }
-
-                        if should_send_message {
-                            ensure_interconnect_registered(&device_addr).await;
-
+                    if let Some(device_addr) = check_device().await {
+                        if check_app_version(&device_addr).await {
                             let payload = format!(
                                 r#"{{"type":"changeEvent","name":"{}","date":"{}","on_index":{},"IFStaringDay":{},"index":{}}}"#,
-                                event_name_clone,
-                                event_time_clone,
-                                on_index_clone,
-                                if_staring_day_clone,
-                                index_clone
+                                event_name_clone, event_time_clone, on_index_clone, if_staring_day_clone, index_clone
                             );
 
-                            let result = interconnect::send_qaic_message(
-                                &device_addr,
-                                "com.yzf.daymatter",
-                                &payload,
-                            )
-                            .await;
-                            if let Ok(_) = result {
+                            if send_to_daymatter(&device_addr, &payload).await {
                                 let root_id: Option<String>;
                                 {
                                     let mut state = ui_state()
@@ -992,7 +679,6 @@ fn handle_button_click(event: &str) {
                                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                                     state.error_message = Some("发送成功！".to_string());
                                     state.is_success_message = true;
-                                    // 更新 all_events 中对应的事件数据
                                     if let Some(index) = state.selected_event_index {
                                         if let Some(event) = state.all_events.get_mut(index) {
                                             event.name = event_name_clone.clone();
@@ -1000,7 +686,6 @@ fn handle_button_click(event: &str) {
                                             event.on_index = on_index_clone;
                                             event.if_staring_day = if_staring_day_clone;
                                         }
-                                        // 更新选中的事件名称
                                         state.selected_event_name =
                                             Some(format!("{}　{}", index + 1, event_name_clone));
                                     }
@@ -1010,35 +695,7 @@ fn handle_button_click(event: &str) {
                                     let ui = build_main_ui();
                                     psys_host::ui::render(&root_id, ui);
                                 }
-                            } else {
-                                let root_id: Option<String>;
-                                {
-                                    let mut state = ui_state()
-                                        .write()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                    state.error_message = Some("发送失败，请重试".to_string());
-                                    state.is_success_message = false;
-                                    root_id = state.root_element_id.clone();
-                                }
-                                if let Some(root_id) = root_id {
-                                    let ui = build_main_ui();
-                                    psys_host::ui::render(&root_id, ui);
-                                }
                             }
-                        }
-                    } else {
-                        let root_id: Option<String>;
-                        {
-                            let mut state = ui_state()
-                                .write()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            state.error_message = Some("未找到设备".to_string());
-                            state.is_success_message = false;
-                            root_id = state.root_element_id.clone();
-                        }
-                        if let Some(root_id) = root_id {
-                            let ui = build_main_ui();
-                            psys_host::ui::render(&root_id, ui);
                         }
                     }
                 });
@@ -1059,122 +716,21 @@ fn handle_button_click(event: &str) {
             };
 
             if let Some(msg) = error_message {
-                let root_id: Option<String>;
-                {
-                    let mut state = ui_state()
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state.error_message = Some(msg);
-                    state.is_success_message = false;
-                    root_id = state.root_element_id.clone();
-                }
-                if let Some(root_id) = root_id {
-                    let ui = build_main_ui();
-                    psys_host::ui::render(&root_id, ui);
-                }
+                show_error_message(&msg);
             } else {
-                let root_id: Option<String>;
-                {
-                    let mut state = ui_state()
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state.error_message = Some("正在发送，请稍等···".to_string());
-                    state.is_success_message = false;
-                    root_id = state.root_element_id.clone();
-                }
-                if let Some(root_id) = root_id {
-                    let ui = build_main_ui();
-                    psys_host::ui::render(&root_id, ui);
-                }
+                show_message("正在发送，请稍等···", false);
 
                 let index_clone = selected_index.unwrap_or(0);
 
                 wit_bindgen::block_on(async move {
-                    let device_list = device::get_connected_device_list().await;
-                    if let Some(device) = device_list.first() {
-                        tracing::info!("device: {:?}", device_list);
-                        let device_addr = device.addr.clone();
-                        tracing::info!("device_addr: {:?}", device_addr);
-
-                        let mut should_send_message = false;
-
-                        let app_list = thirdpartyapp::get_thirdparty_app_list(&device_addr).await;
-
-                        if let Ok(apps) = app_list {
-                            tracing::info!("app: {:?}", apps);
-                            let app = apps.iter().find(|app: &&thirdpartyapp::AppInfo| {
-                                app.package_name == "com.yzf.daymatter"
-                            });
-                            if let Some(app) = app {
-                                if app.version_code >= 10400 {
-                                    let _ =
-                                        thirdpartyapp::launch_qa(&device_addr, app, "/index").await;
-                                    std::thread::sleep(Duration::from_secs(2));
-                                    should_send_message = true;
-                                } else {
-                                    let root_id: Option<String>;
-                                    {
-                                        let mut state = ui_state()
-                                            .write()
-                                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                        state.error_message =
-                                            Some("请先安装倒数日快应用的新版本！".to_string());
-                                        root_id = state.root_element_id.clone();
-                                    }
-                                    if let Some(root_id) = root_id {
-                                        let ui = build_main_ui();
-                                        psys_host::ui::render(&root_id, ui);
-                                    }
-                                    return;
-                                }
-                            } else {
-                                let root_id: Option<String>;
-                                {
-                                    let mut state = ui_state()
-                                        .write()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                    state.error_message = Some("请先安装倒数日快应用".to_string());
-                                    state.is_success_message = false;
-                                    root_id = state.root_element_id.clone();
-                                }
-                                if let Some(root_id) = root_id {
-                                    let ui = build_main_ui();
-                                    psys_host::ui::render(&root_id, ui);
-                                }
-                                return;
-                            }
-                        } else {
-                            let root_id: Option<String>;
-                            {
-                                let mut state = ui_state()
-                                    .write()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                state.error_message = Some("获取应用列表失败".to_string());
-                                state.is_success_message = false;
-                                root_id = state.root_element_id.clone();
-                            }
-                            if let Some(root_id) = root_id {
-                                let ui = build_main_ui();
-                                psys_host::ui::render(&root_id, ui);
-                            }
-                            return;
-                        }
-
-                        if should_send_message {
-                            ensure_interconnect_registered(&device_addr).await;
-
+                    if let Some(device_addr) = check_device().await {
+                        if check_app_version(&device_addr).await {
                             let payload = format!(
                                 r#"{{"type":"deleteEvent","index":{}}}"#,
                                 index_clone
                             );
 
-                            let result = interconnect::send_qaic_message(
-                                &device_addr,
-                                "com.yzf.daymatter",
-                                &payload,
-                            )
-                            .await;
-                            if let Ok(_) = result {
+                            if send_to_daymatter(&device_addr, &payload).await {
                                 let root_id: Option<String>;
                                 {
                                     let mut state = ui_state()
@@ -1182,10 +738,8 @@ fn handle_button_click(event: &str) {
                                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                                     state.error_message = Some("发送成功！".to_string());
                                     state.is_success_message = true;
-                                    // 从 all_events 中移除该事件
                                     if let Some(index) = state.selected_event_index {
                                         state.all_events.remove(index);
-                                        // 清空选中的事件
                                         state.selected_event_index = None;
                                         state.selected_event_name = None;
                                     }
@@ -1195,34 +749,7 @@ fn handle_button_click(event: &str) {
                                     let ui = build_main_ui();
                                     psys_host::ui::render(&root_id, ui);
                                 }
-                            } else {
-                                let root_id: Option<String>;
-                                {
-                                    let mut state = ui_state()
-                                        .write()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                    state.error_message = Some("发送失败，请重试".to_string());
-                                    root_id = state.root_element_id.clone();
-                                }
-                                if let Some(root_id) = root_id {
-                                    let ui = build_main_ui();
-                                    psys_host::ui::render(&root_id, ui);
-                                }
                             }
-                        }
-                    } else {
-                        let root_id: Option<String>;
-                        {
-                            let mut state = ui_state()
-                                .write()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            state.error_message = Some("未找到设备".to_string());
-                            state.is_success_message = false;
-                            root_id = state.root_element_id.clone();
-                        }
-                        if let Some(root_id) = root_id {
-                            let ui = build_main_ui();
-                            psys_host::ui::render(&root_id, ui);
                         }
                     }
                 });
@@ -1418,38 +945,6 @@ fn handle_button_click(event: &str) {
             }
         }
         _ => {}
-    }
-}
-
-// 鼠标进入事件处理
-fn handle_mouse_enter(event: &str) {
-    let root_id: Option<String>;
-    {
-        let mut state = ui_state()
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.hovered_button = Some(event.to_string());
-        root_id = state.root_element_id.clone();
-    }
-    if let Some(root_id) = root_id {
-        let ui = build_main_ui();
-        psys_host::ui::render(&root_id, ui);
-    }
-}
-
-// 鼠标离开事件处理
-fn handle_mouse_leave(_event: &str) {
-    let root_id: Option<String>;
-    {
-        let mut state = ui_state()
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.hovered_button = None;
-        root_id = state.root_element_id.clone();
-    }
-    if let Some(root_id) = root_id {
-        let ui = build_main_ui();
-        psys_host::ui::render(&root_id, ui);
     }
 }
 
