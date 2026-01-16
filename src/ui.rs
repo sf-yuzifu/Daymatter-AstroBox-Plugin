@@ -948,6 +948,38 @@ fn handle_button_click(event: &str) {
     }
 }
 
+// 鼠标进入事件处理
+fn handle_mouse_enter(event: &str) {
+    let root_id: Option<String>;
+    {
+        let mut state = ui_state()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.hovered_button = Some(event.to_string());
+        root_id = state.root_element_id.clone();
+    }
+    if let Some(root_id) = root_id {
+        let ui = build_main_ui();
+        psys_host::ui::render(&root_id, ui);
+    }
+}
+
+// 鼠标离开事件处理
+fn handle_mouse_leave(_event: &str) {
+    let root_id: Option<String>;
+    {
+        let mut state = ui_state()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.hovered_button = None;
+        root_id = state.root_element_id.clone();
+    }
+    if let Some(root_id) = root_id {
+        let ui = build_main_ui();
+        psys_host::ui::render(&root_id, ui);
+    }
+}
+
 // 事件处理器
 pub fn ui_event_processor(evtype: ui::Event, event: &str, event_payload: &str) {
     // 输出事件类型的原始字符串表示
@@ -971,10 +1003,10 @@ pub fn ui_event_processor(evtype: ui::Event, event: &str, event_payload: &str) {
             }
         }
         ui::Event::MouseEnter => {
-            // handle_mouse_enter(event);
+            handle_mouse_enter(event);
         }
         ui::Event::MouseLeave => {
-            // handle_mouse_leave(event);
+            handle_mouse_leave(event);
         }
         _ => {}
     }
