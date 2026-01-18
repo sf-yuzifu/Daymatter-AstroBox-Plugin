@@ -672,8 +672,6 @@ fn handle_mouse_leave(_event: &str) {
 }
 
 pub fn ui_event_processor(evtype: ui::Event, event: &str, event_payload: &str) {
-    check_and_hide_message();
-    
     let evtype_str = format!("{:?}", evtype);
     tracing::info!(
         "接收到事件: 类型={}, 名称={}, 载荷={}",

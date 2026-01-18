@@ -1,61 +1,55 @@
-use crate::astrobox::psys_host::{self, device, interconnect, register, thirdpartyapp};
-use std::time::{Duration, SystemTime};
+use crate::astrobox::psys_host::{self, device, interconnect, register, thirdpartyapp, timer};
+use std::time::Duration;
 use super::state::*;
 use super::build::build_main_ui;
 
 pub fn show_message(msg: &str, is_success: bool) {
+    let (root_id, old_timer_id) = {
+        let mut state = ui_state()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        
+        let old_timer_id = state.message_timer_id;
+        
+        state.error_message = Some(msg.to_string());
+        state.is_success_message = is_success;
+        
+        (state.root_element_id.clone(), old_timer_id)
+    };
+    
+    if let Some(root_id) = root_id {
+        let ui = build_main_ui();
+        psys_host::ui::render(&root_id, ui);
+    }
+    
+    wit_bindgen::block_on(async move {
+        if let Some(timer_id) = old_timer_id {
+            let _ = timer::clear_timer(timer_id).await;
+        }
+        
+        let timer_id = timer::set_timeout(3000, "hide_message").await;
+        
+        let mut state = ui_state()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.message_timer_id = Some(timer_id);
+    });
+}
+
+pub fn hide_message() {
     let root_id: Option<String>;
     {
         let mut state = ui_state()
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.error_message = Some(msg.to_string());
-        state.is_success_message = is_success;
-        state.message_show_time = Some(SystemTime::now());
+        state.error_message = None;
+        state.message_timer_id = None;
         root_id = state.root_element_id.clone();
     }
+    
     if let Some(root_id) = root_id {
         let ui = build_main_ui();
         psys_host::ui::render(&root_id, ui);
-    }
-}
-
-pub fn check_and_hide_message() {
-    let should_hide = {
-        let state = ui_state()
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        
-        if let Some(show_time) = state.message_show_time {
-            if let Ok(elapsed) = show_time.elapsed() {
-                if elapsed >= Duration::from_secs(3) {
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    };
-    
-    if should_hide {
-        let root_id: Option<String>;
-        {
-            let mut state = ui_state()
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.error_message = None;
-            state.message_show_time = None;
-            root_id = state.root_element_id.clone();
-        }
-        
-        if let Some(root_id) = root_id {
-            let ui = build_main_ui();
-            psys_host::ui::render(&root_id, ui);
-        }
     }
 }
 

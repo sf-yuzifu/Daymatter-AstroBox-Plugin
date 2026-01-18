@@ -1,4 +1,5 @@
 use wit_bindgen::FutureReader;
+use serde_json::Value;
 
 use crate::exports::astrobox::psys_plugin::{
     event::{self, EventType},
@@ -13,6 +14,21 @@ wit_bindgen::generate!({
     world: "psys-world",
     generate_all,
 });
+
+fn extract_payload_text(payload: &str) -> String {
+    if let Ok(json) = serde_json::from_str::<Value>(payload) {
+        if let Some(text) = json.get("payloadText").and_then(|v| v.as_str()) {
+            return text.to_string();
+        }
+        if let Some(payload_value) = json.get("payload") {
+            if let Some(text) = payload_value.as_str() {
+                return text.to_string();
+            }
+            return payload_value.to_string();
+        }
+    }
+    payload.to_string()
+}
 
 struct MyPlugin;
 
@@ -30,6 +46,12 @@ impl event::Guest for MyPlugin {
             EventType::ProviderAction => {}
             EventType::DeeplinkAction => {}
             EventType::TransportPacket => {}
+            EventType::Timer => {
+                let payload = extract_payload_text(&event_payload);
+                if payload == "hide_message" {
+                    ui::hide_message();
+                }
+            }
         };
 
         tracing::info!("event_type: {:?}, event_payload: {}", event_type, event_payload);
