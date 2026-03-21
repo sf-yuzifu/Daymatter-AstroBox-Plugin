@@ -1,5 +1,8 @@
-use crate::astrobox::psys_host::{self, ui};
+use crate::astrobox::psys_host::{self, ui, dialog};
 use serde_json::Value;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use image::{ImageReader, imageops::FilterType, GenericImageView};
+use std::io::Cursor;
 use super::state::*;
 use super::message::*;
 use super::validation::*;
@@ -30,8 +33,10 @@ pub const SELECT_EVENT_DROPDOWN_EVENT: &str = "select_event_dropdown";
 pub const TAB_ADD_EVENT: &str = "tab_add_event";
 pub const TAB_MODIFY_EVENT: &str = "tab_modify_event";
 pub const TAB_DELETE_EVENT: &str = "tab_delete_event";
+pub const TAB_ADD_BACKGROUND: &str = "tab_add_background";
 pub const HIDE_ERROR_EVENT: &str = "hide_error";
 pub const BUTTON_MOUSE_LEAVE: &str = "button_mouse_leave";
+pub const ADD_BACKGROUND_BUTTON_EVENT: &str = "add_background_button";
 
 pub fn handle_interconnect_message(payload: &str) {
     tracing::info!("收到手环端消息: {}", payload);
@@ -581,6 +586,51 @@ fn handle_button_click(event: &str) {
                 psys_host::ui::render(&root_id, ui);
             }
         }
+        ADD_BACKGROUND_BUTTON_EVENT => {
+            show_message("正在选择图片，请稍等···", false);
+            
+            wit_bindgen::block_on(async move {
+                let pick_config = dialog::PickConfig {
+                    read: true,
+                    copy_to: None,
+                };
+                let filter_config = dialog::FilterConfig {
+                    multiple: false,
+                    extensions: vec!["png".to_string(), "jpg".to_string(), "jpeg".to_string()],
+                    default_directory: "".to_string(),
+                    default_file_name: "".to_string(),
+                };
+                
+                let pick_result = dialog::pick_file(&pick_config, &filter_config).await;
+                
+                if let Some(device_addr) = check_device().await {
+                    if check_app_version(&device_addr).await {
+                        match compress_image(&pick_result.data) {
+                            Ok(compressed_data) => {
+                                let base64_data = STANDARD.encode(&compressed_data);
+                                let payload = format!(
+                                    r#"{{"type":"addBG","bgBase64":"{}"}}"#,
+                                    base64_data
+                                );
+                                
+                                tracing::info!("发送背景图片: 原始大小={}KB, 压缩后大小={}KB, payload长度={}", 
+                                    pick_result.data.len() / 1024, 
+                                    compressed_data.len() / 1024,
+                                    payload.len());
+                                
+                                if send_to_daymatter(&device_addr, &payload).await {
+                                    show_success_message("背景图片发送成功！");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("图片压缩失败: {}", e);
+                                show_message("图片处理失败，请重试", false);
+                            }
+                        }
+                    }
+                }
+            });
+        }
         TAB_ADD_EVENT => {
             let root_id: Option<String>;
             {
@@ -616,6 +666,20 @@ fn handle_button_click(event: &str) {
                     .write()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 state.current_tab = EventType::DeleteEvent;
+                root_id = state.root_element_id.clone();
+            }
+            if let Some(root_id) = root_id {
+                let ui = build_main_ui();
+                psys_host::ui::render(&root_id, ui);
+            }
+        }
+        TAB_ADD_BACKGROUND => {
+            let root_id: Option<String>;
+            {
+                let mut state = ui_state()
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.current_tab = EventType::AddBackground;
                 root_id = state.root_element_id.clone();
             }
             if let Some(root_id) = root_id {
@@ -698,4 +762,61 @@ pub fn ui_event_processor(evtype: ui::Event, event: &str, event_payload: &str) {
         }
         _ => {}
     }
+}
+
+fn compress_image(image_data: &[u8]) -> Result<Vec<u8>, String> {
+    let img = ImageReader::new(Cursor::new(image_data))
+        .with_guessed_format()
+        .map_err(|e| format!("无法读取图片: {}", e))?
+        .decode()
+        .map_err(|e| format!("无法解码图片: {}", e))?;
+
+    let (orig_width, orig_height) = img.dimensions();
+    tracing::info!("原始图片尺寸: {}x{}", orig_width, orig_height);
+
+    let (new_width, new_height) = if orig_width > orig_height {
+        if orig_width > 450 {
+            (450, (450 * orig_height) / orig_width)
+        } else {
+            (orig_width, orig_height)
+        }
+    } else {
+        if orig_height > 450 {
+            ((450 * orig_width) / orig_height, 450)
+        } else {
+            (orig_width, orig_height)
+        }
+    };
+
+    tracing::info!("调整后尺寸: {}x{}", new_width, new_height);
+
+    let resized = img.resize(new_width, new_height, FilterType::Lanczos3);
+
+    let mut output = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, 85);
+    resized
+        .write_with_encoder(encoder)
+        .map_err(|e| format!("编码JPEG失败: {}", e))?;
+
+    let output_size_kb = output.len() / 1024;
+    tracing::info!("压缩后大小: {}KB", output_size_kb);
+
+    if output.len() > 100 * 1024 {
+        let mut quality = 80;
+        while quality > 50 && output.len() > 100 * 1024 {
+            output.clear();
+            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, quality);
+            resized
+                .write_with_encoder(encoder)
+                .map_err(|e| format!("编码JPEG失败: {}", e))?;
+            quality -= 5;
+            tracing::info!("调整质量到 {}, 大小: {}KB", quality, output.len() / 1024);
+        }
+
+        if output.len() > 100 * 1024 {
+            return Err(format!("图片压缩后仍超过100KB限制: {}KB", output.len() / 1024));
+        }
+    }
+
+    Ok(output)
 }

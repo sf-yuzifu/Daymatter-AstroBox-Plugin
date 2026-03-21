@@ -6,6 +6,7 @@ pub enum EventType {
     AddEvent,
     ModifyEvent,
     DeleteEvent,
+    AddBackground,
 }
 
 #[derive(Debug, Clone)]

@@ -1,6 +1,6 @@
 use crate::astrobox::psys_host::{self, ui};
 use super::state::{ui_state, EventType, UiState};
-use super::event_handler::{EVENT_NAME_INPUT_EVENT, EVENT_TIME_INPUT_EVENT, ON_INDEX_YES_EVENT, ON_INDEX_NO_EVENT, IF_STARING_DAY_YES_EVENT, IF_STARING_DAY_NO_EVENT, ADD_EVENT_BUTTON_EVENT, BUTTON_MOUSE_LEAVE, MODIFY_EVENT_NAME_INPUT_EVENT, MODIFY_EVENT_TIME_INPUT_EVENT, MODIFY_ON_INDEX_YES_EVENT, MODIFY_ON_INDEX_NO_EVENT, MODIFY_IF_STARING_DAY_YES_EVENT, MODIFY_IF_STARING_DAY_NO_EVENT, GET_EVENTS_BUTTON_EVENT, CHANGE_EVENT_BUTTON_EVENT, DELETE_EVENT_BUTTON_EVENT, SELECT_EVENT_DROPDOWN_EVENT, TAB_ADD_EVENT, TAB_MODIFY_EVENT, TAB_DELETE_EVENT, HIDE_ERROR_EVENT};
+use super::event_handler::{EVENT_NAME_INPUT_EVENT, EVENT_TIME_INPUT_EVENT, ON_INDEX_YES_EVENT, ON_INDEX_NO_EVENT, IF_STARING_DAY_YES_EVENT, IF_STARING_DAY_NO_EVENT, ADD_EVENT_BUTTON_EVENT, BUTTON_MOUSE_LEAVE, MODIFY_EVENT_NAME_INPUT_EVENT, MODIFY_EVENT_TIME_INPUT_EVENT, MODIFY_ON_INDEX_YES_EVENT, MODIFY_ON_INDEX_NO_EVENT, MODIFY_IF_STARING_DAY_YES_EVENT, MODIFY_IF_STARING_DAY_NO_EVENT, GET_EVENTS_BUTTON_EVENT, CHANGE_EVENT_BUTTON_EVENT, DELETE_EVENT_BUTTON_EVENT, SELECT_EVENT_DROPDOWN_EVENT, TAB_ADD_EVENT, TAB_MODIFY_EVENT, TAB_DELETE_EVENT, TAB_ADD_BACKGROUND, HIDE_ERROR_EVENT, ADD_BACKGROUND_BUTTON_EVENT};
 
 pub fn build_add_event_ui(state: &UiState) -> ui::Element {
     let container = ui::Element::new(ui::ElementType::Div, None)
@@ -501,6 +501,36 @@ pub fn build_delete_event_ui(state: &UiState) -> ui::Element {
         .child(button_group)
 }
 
+pub fn build_add_background_ui(state: &UiState) -> ui::Element {
+    let container = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column);
+
+    let description = ui::Element::new(ui::ElementType::P, Some("点击下方按钮选择背景图片，支持 PNG、JPG、JPEG 格式"))
+        .size(16)
+        .margin_bottom(20);
+
+    let add_background_button = ui::Element::new(ui::ElementType::Button, Some("选择背景图片"))
+        .without_default_styles()
+        .on(ui::Event::Click, ADD_BACKGROUND_BUTTON_EVENT)
+        .on(ui::Event::MouseEnter, ADD_BACKGROUND_BUTTON_EVENT)
+        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
+        .radius(8)
+        .padding(14)
+        .bg(
+            if state.hovered_button.as_deref() == Some(ADD_BACKGROUND_BUTTON_EVENT) {
+                "#4b4b4b"
+            } else {
+                "#2A2A2A"
+            },
+        )
+        .width_full();
+
+    container
+        .child(description)
+        .child(add_background_button)
+}
+
 pub fn build_main_ui() -> ui::Element {
     let state = ui_state()
         .read()
@@ -603,10 +633,30 @@ pub fn build_main_ui() -> ui::Element {
         .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
         .radius(8);
 
+    let add_background_tab = ui::Element::new(ui::ElementType::Button, Some("添加背景"))
+        .without_default_styles()
+        .padding_left(20)
+        .padding_right(20)
+        .padding_top(12)
+        .padding_bottom(12)
+        .margin(5)
+        .bg(if state.current_tab == EventType::AddBackground {
+            "#424242"
+        } else if state.hovered_button.as_deref() == Some(TAB_ADD_BACKGROUND) {
+            "#4b4b4b"
+        } else {
+            "#2A2A2A"
+        })
+        .on(ui::Event::Click, TAB_ADD_BACKGROUND)
+        .on(ui::Event::MouseEnter, TAB_ADD_BACKGROUND)
+        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
+        .radius(8);
+
     let tabs = tab_container
         .child(add_event_tab)
         .child(modify_event_tab)
-        .child(delete_event_tab);
+        .child(delete_event_tab)
+        .child(add_background_tab);
 
     let content_container = ui::Element::new(ui::ElementType::Div, None)
         .flex()
@@ -618,6 +668,7 @@ pub fn build_main_ui() -> ui::Element {
         EventType::AddEvent => build_add_event_ui(&state),
         EventType::ModifyEvent => build_modify_event_ui(&state),
         EventType::DeleteEvent => build_delete_event_ui(&state),
+        EventType::AddBackground => build_add_background_ui(&state),
     };
 
     let tabs_wrapper = tabs_wrapper.child(tabs);

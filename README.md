@@ -203,7 +203,7 @@ pub fn handle_interconnect_message(payload: &str) {
 
 - **WASI 版本**：2
 - **API 级别**：2
-- **手环应用**：倒数日快应用 (版本 >= 10400)
+- **手环应用**：倒数日快应用 (版本 >= 21000)
 
 ## 许可证
 

@@ -83,7 +83,7 @@ pub async fn check_app_version(device_addr: &str) -> bool {
             app.package_name == "com.yzf.daymatter"
         });
         if let Some(app) = app {
-            if app.version_code >= 10400 {
+            if app.version_code >= 21000 {
                 let _ = thirdpartyapp::launch_qa(device_addr, app, "/index").await;
                 std::thread::sleep(Duration::from_secs(2));
                 true
