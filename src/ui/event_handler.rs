@@ -210,11 +210,59 @@ async fn pick_background() {
 
 /// 腕端互联消息：解析事件列表并刷新界面（E-12 无效条目与越界防护）
 pub async fn handle_interconnect_message(payload: &str) {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
+        if value.get("type").and_then(|v| v.as_str()) == Some("capabilities") {
+            let mut state = write_state();
+            let session = value.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+            if session == state.session_id {
+                state.protocol_v2 = value.get("protocolVersion").and_then(|v| v.as_u64()).unwrap_or(0) >= 2;
+                state.capabilities = value.get("capabilities").and_then(|v| v.as_array()).map(|items|
+                    items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect()).unwrap_or_default();
+            }
+            return;
+        }
+        if value.get("type").and_then(|v| v.as_str()) == Some("mutationResult") {
+            let accepted = {
+                let mut state = write_state();
+                let session_ok = value.get("sessionId").and_then(|v| v.as_str()) == Some(state.session_id.as_str());
+                let device_ok = state.target_device.as_deref().is_some_and(|device|
+                    value.get("deviceId").and_then(|v| v.as_str()) == Some(device));
+                let id = value.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+                let token = id.strip_prefix("req-").and_then(|n| n.parse::<u64>().ok());
+                let revision = value.get("revision").and_then(|v| v.as_u64());
+                let revision_ok = match (revision, state.awaiting_revision) {
+                    (Some(current), Some(base)) => current >= base,
+                    _ => true,
+                };
+                if session_ok && device_ok && revision_ok && token.is_some() && state.result_deadline == token {
+                    state.result_deadline = None;
+                    if value.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                        state.awaiting_confirmation = false;
+                        state.awaiting_revision = None;
+                        state.revision = revision;
+                    }
+                    true
+                } else { false }
+            };
+            if accepted {
+                let ok = value.get("ok").and_then(|v| v.as_bool()) == Some(true);
+                message::set_status_timed(if ok { StatusKind::Success } else { StatusKind::Error },
+                    if ok { "腕端已保存" } else { "腕端保存失败，请重新同步确认" });
+            }
+            return;
+        }
+    }
     match protocol::parse_event_list(payload) {
         Ok(parsed) => {
             let skipped = parsed.skipped;
             let request = {
                 let mut state = write_state();
+                let envelope: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+                let envelope = envelope.get("data").unwrap_or(&envelope);
+                if let Some(session) = envelope.get("sessionId").and_then(|v| v.as_str()) {
+                    if session != state.session_id { return; }
+                }
+                if state.target_device.is_none() { return; }
                 state.all_events = parsed.events;
                 state.has_fetched_events = true;
                 state.event_page = 0;

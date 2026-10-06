@@ -253,6 +253,10 @@ Level 4 的导出全部是 `async func`，旧宿主（仅支持 Level 2 / 3）�
 因此发布时保留上一版 `api_level 2` 插件包，直到确认用户宿主已升级；
 快应用侧不感知插件版本，协议字段（`id` / `primaryId` / `revision`）对旧插件均为可选增量。
 
+本仓库没有 AstroBox V4 的具体最低语义化版本号，不能据 API Level 推测版本号；安装前应以宿主插件管理器报告的 API Level 4 能力为准。发布策略是保留上一版 Level 2 ABP 作为独立回退包，新版只发布给 Level 4 宿主；Level 4 插件启动后与腕端协商 `protocolVersion: 2` 和逐项 capabilities，未收到能力确认时保持旧业务 JSON，不发送新协议字段。快应用版本门槛为 `versionCode >= 21000`。
+
+同步协议 v2 使用 `requestId` + `sessionId`，腕端只在正式事件文件提交后回报 mutation 结果；查询原请求不会重放增删改。结果缓存限制 32 条，随快应用进程销毁失效，重启后须重新拉取事件列表。当前 interconnect 消息未暴露可信发送方设备地址，因此回包用会话与 requestId 关联，并要求操作前复核当前连接设备；不能将 JSON 内自报的 deviceId 当作身份认证。
+
 ## 许可证
 
 本项目采用 Apache License 2.0 许可证。详见 [LICENSE](LICENSE) 文件。

@@ -587,6 +587,9 @@ mod tests {
             in_progress: true,
             purpose: crate::ui::state::SendPurpose::Mutation,
             base_revision: None,
+            request_id: String::new(),
+            session_id: String::new(),
+            device_id: String::new(),
         });
         let view = build(&state);
         assert!(view.busy);
@@ -604,6 +607,9 @@ mod tests {
             in_progress: true,
             purpose: crate::ui::state::SendPurpose::Mutation,
             base_revision: None,
+            request_id: String::new(),
+            session_id: String::new(),
+            device_id: String::new(),
         });
         let change = crate::ui::dispatch::apply_action(&mut state, Action::SubmitAdd);
         assert!(!change.rebuild);
@@ -668,6 +674,9 @@ mod tests {
             in_progress: true,
             purpose: crate::ui::state::SendPurpose::Mutation,
             base_revision: None,
+            request_id: String::new(),
+            session_id: String::new(),
+            device_id: String::new(),
         });
         assert!(should_render(&mut state, false).is_some(), "在途锁定必须重画");
     }

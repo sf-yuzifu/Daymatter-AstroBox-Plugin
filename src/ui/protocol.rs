@@ -30,6 +30,39 @@ impl ParseIssue {
 
 pub const PKG_NAME: &str = "com.yzf.daymatter";
 pub const MIN_APP_VERSION_CODE: u32 = 21000;
+pub const PROTOCOL_VERSION: u32 = 2;
+
+pub fn new_session_id(sequence: u64) -> String {
+    format!("abp-{}-{}", std::process::id(), sequence)
+}
+
+pub fn capabilities(session_id: &str) -> String {
+    json!({"type":"hello", "protocolVersion":PROTOCOL_VERSION, "sessionId":session_id,
+        "capabilities":["stableId","mutationResult","requestId","themeColor","primaryId","revision","backgroundJpeg"]}).to_string()
+}
+
+pub fn request_status(request_id: &str, session_id: &str) -> String {
+    json!({"type":"getRequestResult", "requestId":request_id, "sessionId":session_id}).to_string()
+}
+
+pub fn request_status_for(request_id: &str, session_id: &str, device_id: &str) -> String {
+    json!({"type":"getRequestResult", "requestId":request_id, "sessionId":session_id, "deviceId":device_id}).to_string()
+}
+
+pub fn set_request_identity(payload: &str, request_id: &str, session_id: &str) -> String {
+    set_request_identity_for(payload, request_id, session_id, "")
+}
+
+pub fn set_request_identity_for(payload: &str, request_id: &str, session_id: &str, device_id: &str) -> String {
+    let mut value: Value = serde_json::from_str(payload).unwrap_or_else(|_| json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert("protocolVersion".into(), json!(PROTOCOL_VERSION));
+        object.insert("requestId".into(), json!(request_id));
+        object.insert("sessionId".into(), json!(session_id));
+        if !device_id.is_empty() { object.insert("deviceId".into(), json!(device_id)); }
+    }
+    value.to_string()
+}
 
 pub fn add_event(draft: &EventData) -> String {
     json!({
@@ -173,6 +206,20 @@ mod tests {
         assert_eq!(parsed["date"], "2026-03-05");
         assert_eq!(parsed["on_index"], true);
         assert_eq!(parsed["IFStaringDay"], false);
+    }
+
+    #[test]
+    fn 能力协商与请求身份序列化可往返() {
+        let hello: Value = serde_json::from_str(&capabilities("session-x")).unwrap();
+        assert_eq!(hello["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(hello["sessionId"], "session-x");
+        assert!(hello["capabilities"].as_array().unwrap().iter().any(|v| v == "requestId"));
+        let tagged: Value = serde_json::from_str(&set_request_identity(&add_event(&EventData::draft("🎂", "2026-07-01", true, false)), "req-8", "session-x")).unwrap();
+        assert_eq!(tagged["requestId"], "req-8");
+        assert_eq!(tagged["sessionId"], "session-x");
+        let query: Value = serde_json::from_str(&request_status("req-8", "session-x")).unwrap();
+        assert_eq!(query["type"], "getRequestResult");
+        assert_eq!(query["requestId"], "req-8");
     }
 
     #[test]

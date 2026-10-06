@@ -141,6 +141,9 @@ pub struct PendingSend {
     pub in_progress: bool,
     pub purpose: SendPurpose,
     pub base_revision: Option<u64>,
+    pub request_id: String,
+    pub session_id: String,
+    pub device_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +190,11 @@ pub struct UiState {
     pub awaiting_confirmation: bool,
     pub awaiting_revision: Option<u64>,
     pub delete_dialog_open: bool,
+    pub session_id: String,
+    pub target_device: Option<String>,
+    pub protocol_v2: bool,
+    pub capabilities: Vec<String>,
+    pub result_deadline: Option<u64>,
 }
 
 impl UiState {
@@ -213,6 +221,11 @@ impl UiState {
             awaiting_confirmation: false,
             awaiting_revision: None,
             delete_dialog_open: false,
+            session_id: String::new(),
+            target_device: None,
+            protocol_v2: false,
+            capabilities: Vec::new(),
+            result_deadline: None,
         }
     }
 
@@ -299,15 +312,24 @@ impl UiState {
             in_progress: true,
             purpose,
             base_revision: self.revision,
+            request_id: format!("req-{}", token),
+            session_id: self.session_id.clone(),
+            device_id: self.target_device.clone().unwrap_or_default(),
         });
         Some(token)
     }
 
     pub fn attach_send_device(&mut self, token: u64, device_addr: String) -> bool {
+        if self.target_device.as_deref().is_some_and(|target| target != device_addr) {
+            self.session_id = format!("{}-{}", self.session_id, self.send_sequence);
+        }
+        self.target_device = Some(device_addr.clone());
         let Some(pending) = self.pending_send.as_mut().filter(|pending| pending.token == token) else {
             return false;
         };
         pending.device_addr = device_addr;
+        pending.device_id = self.target_device.clone().unwrap_or_default();
+        pending.session_id = self.session_id.clone();
         pending.in_progress = false;
         true
     }
@@ -574,6 +596,24 @@ mod tests {
         let claimed = state.claim_send(token).unwrap();
         assert_eq!(claimed.payload, "add");
         assert!(state.claim_send(token).is_none(), "同一 timer token 只能领取一次");
+    }
+
+    #[test]
+    fn 请求身份固定且换设备必须清空旧快照() {
+        let mut state = UiState::new("2026-10-06".into());
+        state.session_id = "session-a".into();
+        let token = state.reserve_send("{}".into(), SendPurpose::Mutation).unwrap();
+        let pending = state.pending_send.as_ref().unwrap();
+        assert_eq!(pending.request_id, format!("req-{token}"));
+        assert_eq!(pending.session_id, "session-a");
+        state.target_device = Some("device-a".into());
+        state.all_events.push(EventData {id:"e1".into(), name:"old".into(), ..Default::default()});
+        state.target_device = Some("device-b".into());
+        state.all_events.clear();
+        state.clear_selection();
+        state.has_fetched_events = false;
+        assert!(state.all_events.is_empty());
+        assert!(!state.has_fetched_events);
     }
 
     #[test]

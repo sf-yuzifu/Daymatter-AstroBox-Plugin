@@ -7,8 +7,8 @@
 use crate::astrobox::psys_host_v4::{device, dialog, interconnect, os, register, thirdpartyapp, timer};
 use crate::ui::build;
 use crate::ui::dispatch;
-use crate::ui::protocol::{MIN_APP_VERSION_CODE, PKG_NAME};
-use crate::ui::state::{local_date, write_state, PendingSend, SendPurpose, StatusKind};
+use crate::ui::protocol::{self, MIN_APP_VERSION_CODE, PKG_NAME};
+use crate::ui::state::{local_date, read_state, write_state, PendingSend, SendPurpose, StatusKind};
 use chrono::Utc;
 
 pub const HIDE_MESSAGE_TIMER: &str = "hide_message";
@@ -17,6 +17,8 @@ pub const SEND_TIMER: &str = "send_pending:";
 pub const APP_LAUNCH_SETTLE_MS: u64 = 1500;
 pub const MAX_SEND_ATTEMPTS: u32 = 3;
 pub const RETRY_INTERVAL_MS: u64 = 800;
+pub const RESULT_TIMEOUT_MS: u64 = 8000;
+pub const RESULT_TIMER: &str = "request_result:";
 
 /// 状态面板常驻：成功 / 失败不再自动消失，用户可对照腕端核实（P1-51）
 ///
@@ -80,6 +82,9 @@ pub async fn launch_then_send(payload: String, purpose: SendPurpose) -> Result<u
     // clicks can both pass the busy check while device/app lookup is suspended.
     let token = {
         let mut state = write_state();
+        if state.session_id.is_empty() {
+            state.session_id = protocol::new_session_id(state.send_sequence.wrapping_add(1));
+        }
         state.reserve_send(payload, purpose)
     };
     let Some(token) = token else { return Err(SendStartError::Busy) };
@@ -89,11 +94,31 @@ pub async fn launch_then_send(payload: String, purpose: SendPurpose) -> Result<u
         clear_reservation(token);
         return Err(SendStartError::Unavailable);
     };
+    let connected = device::get_connected_device_list().await;
+    if !connected.iter().any(|device| device.addr == device_addr) {
+        clear_reservation(token);
+        set_status_timed(StatusKind::Error, "连接设备已变化，请重新同步");
+        return Err(SendStartError::Unavailable);
+    }
+    {
+        let mut state = write_state();
+        if state.target_device.as_deref().is_some_and(|target| target != device_addr) {
+            state.all_events.clear();
+            state.clear_selection();
+            state.has_fetched_events = false;
+            state.protocol_v2 = false;
+            state.capabilities.clear();
+            state.target_device = Some(device_addr.clone());
+        } else {
+            state.target_device = Some(device_addr.clone());
+        }
+    }
     let Some(app) = find_app(&device_addr).await else {
         clear_reservation(token);
         return Err(SendStartError::Unavailable);
     };
-    if thirdpartyapp::launch_qa(device_addr.clone(), app, "/index".to_string()).await.is_err() {
+    let still_connected = device::get_connected_device_list().await.iter().any(|device| device.addr == device_addr);
+    if !still_connected || thirdpartyapp::launch_qa(device_addr.clone(), app, "/index".to_string()).await.is_err() {
         clear_reservation(token);
         set_status_timed(StatusKind::Error, "启动腕端应用失败");
         return Err(SendStartError::Unavailable);
@@ -152,12 +177,28 @@ pub async fn drive_pending_send(token: u64) {
         state.claim_send(token)
     };
     let Some(pending) = pending else { return };
+    let current_devices = device::get_connected_device_list().await;
+    if !current_devices.iter().any(|device| device.addr == pending.device_addr) {
+        fail_attempt(token, pending, "目标设备已断开或发生变化，请重新连接后同步").await;
+        return;
+    }
     if register::register_interconnect_recv(pending.device_addr.clone(), PKG_NAME.to_string()).await.is_err() {
         fail_attempt(token, pending, "腕端消息接收器注册失败").await;
         return;
     }
+    // Register first, then negotiate. The response is asynchronous; the first command
+    // remains legacy-safe, subsequent mutations use v2 only after capability confirmation.
+    let session_id = { crate::ui::state::read_state().session_id.clone() };
+    let hello = protocol::capabilities(&session_id);
+    let _ = interconnect::send_qaic_message(pending.device_addr.clone(), PKG_NAME.to_string(), hello).await;
+    let payload = {
+        let state = write_state();
+        if pending.purpose == SendPurpose::Mutation && state.protocol_v2 && state.capabilities.iter().any(|c| c == "requestId") {
+            protocol::set_request_identity_for(&pending.payload, &pending.request_id, &pending.session_id, &pending.device_id)
+        } else { pending.payload.clone() }
+    };
     let result =
-        interconnect::send_qaic_message(pending.device_addr.clone(), PKG_NAME.to_string(), pending.payload.clone())
+        interconnect::send_qaic_message(pending.device_addr.clone(), PKG_NAME.to_string(), payload)
             .await;
     if result.is_ok() {
         let mut state = write_state();
@@ -167,18 +208,28 @@ pub async fn drive_pending_send(token: u64) {
         let purpose = completed.purpose;
         if purpose != SendPurpose::Fetch {
             state.require_confirmation(completed.base_revision);
+            if state.protocol_v2 && purpose == SendPurpose::Mutation {
+                state.result_deadline = Some(token);
+            }
         }
         drop(state);
         if purpose == SendPurpose::Fetch {
             // Interconnect accepted the request; completion is the later list response.
             set_status_timed(StatusKind::Info, "请求已发送，等待腕端数据…");
         } else {
-            set_status_timed(StatusKind::Success, dispatch::SENT_TEXT);
+            if read_target_v2() && purpose == SendPurpose::Mutation {
+                timer::set_timeout(RESULT_TIMEOUT_MS, &format!("{}{}", RESULT_TIMER, token));
+                set_status_timed(StatusKind::Info, "已发送，等待腕端保存确认…");
+            } else {
+                set_status_timed(StatusKind::Success, dispatch::SENT_TEXT);
+            }
         }
         return;
     }
     fail_attempt(token, pending, dispatch::SEND_FAILED_TEXT).await;
 }
+
+fn read_target_v2() -> bool { crate::ui::state::read_state().protocol_v2 }
 
 async fn fail_attempt(token: u64, pending: PendingSend, message: &str) {
     let attempts = pending.attempts + 1;
@@ -240,6 +291,24 @@ pub async fn handle_timer_event(payload: &str) {
     }
     if let Some(token) = payload.strip_prefix(SEND_TIMER).and_then(|value| value.parse::<u64>().ok()) {
         drive_pending_send(token).await;
+        return;
+    }
+    if let Some(token) = payload.strip_prefix(RESULT_TIMER).and_then(|value| value.parse::<u64>().ok()) {
+        let request = {
+            let state = read_state();
+            if state.result_deadline != Some(token) { return; }
+            if !state.protocol_v2 { return; }
+            protocol::request_status_for(&format!("req-{}", token), &state.session_id,
+                state.target_device.as_deref().unwrap_or(""))
+        };
+        let device_addr = read_state().target_device.clone();
+        if let Some(device_addr) = device_addr {
+            let _ = interconnect::send_qaic_message(device_addr, PKG_NAME.to_string(), request).await;
+            let mut state = write_state();
+            if state.result_deadline == Some(token) { state.result_deadline = None; }
+            drop(state);
+            set_status_timed(StatusKind::Info, "保存结果待核实，已查询原请求；请刷新腕端数据确认");
+        }
     }
 }
 
