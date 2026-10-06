@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum DateValidationError {
     Empty,
     InvalidFormat,
@@ -85,4 +85,49 @@ pub fn validate_date_format(date_str: &str) -> Result<(), DateValidationError> {
 
 fn is_leap_year(year: u32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 接受合法日期() {
+        for date in ["2026-10-06", "2024-02-29", "2000-02-29", "2026-12-31"] {
+            assert!(validate_date_format(date).is_ok(), "{} 应通过", date);
+        }
+    }
+
+    #[test]
+    fn 拒绝空值与格式错误() {
+        assert_eq!(validate_date_format(""), Err(DateValidationError::Empty));
+        assert_eq!(validate_date_format("2026-1-6"), Err(DateValidationError::InvalidFormat));
+        assert_eq!(validate_date_format("2026/10/06"), Err(DateValidationError::InvalidFormat));
+        assert_eq!(validate_date_format("2026-10-0a"), Err(DateValidationError::InvalidFormat));
+    }
+
+    #[test]
+    fn 拒绝不存在的日历日期() {
+        assert_eq!(validate_date_format("2026-02-30"), Err(DateValidationError::InvalidDay));
+        assert_eq!(validate_date_format("2026-04-31"), Err(DateValidationError::InvalidDay));
+        assert_eq!(validate_date_format("2023-02-29"), Err(DateValidationError::InvalidDay));
+        assert_eq!(validate_date_format("2026-13-01"), Err(DateValidationError::InvalidMonth));
+        assert_eq!(validate_date_format("2026-00-10"), Err(DateValidationError::InvalidMonth));
+        assert_eq!(validate_date_format("2026-10-00"), Err(DateValidationError::InvalidDay));
+    }
+
+    #[test]
+    fn 错误文案可读() {
+        assert_eq!(DateValidationError::Empty.to_string(), "时间不能为空");
+        assert_eq!(DateValidationError::InvalidDay.to_string(), "日期无效");
+        assert!(DateValidationError::InvalidFormat.to_string().contains("YYYY-MM-DD"));
+    }
+
+    #[test]
+    fn 闰年判定符合规则() {
+        assert!(is_leap_year(2024));
+        assert!(is_leap_year(2000));
+        assert!(!is_leap_year(1900));
+        assert!(!is_leap_year(2026));
+    }
 }

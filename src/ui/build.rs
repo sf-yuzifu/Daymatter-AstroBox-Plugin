@@ -1,694 +1,159 @@
-use crate::astrobox::psys_host::{self, ui};
-use super::state::{ui_state, EventType, UiState};
-use super::event_handler::{EVENT_NAME_INPUT_EVENT, EVENT_TIME_INPUT_EVENT, ON_INDEX_YES_EVENT, ON_INDEX_NO_EVENT, IF_STARING_DAY_YES_EVENT, IF_STARING_DAY_NO_EVENT, ADD_EVENT_BUTTON_EVENT, BUTTON_MOUSE_LEAVE, MODIFY_EVENT_NAME_INPUT_EVENT, MODIFY_EVENT_TIME_INPUT_EVENT, MODIFY_ON_INDEX_YES_EVENT, MODIFY_ON_INDEX_NO_EVENT, MODIFY_IF_STARING_DAY_YES_EVENT, MODIFY_IF_STARING_DAY_NO_EVENT, GET_EVENTS_BUTTON_EVENT, CHANGE_EVENT_BUTTON_EVENT, DELETE_EVENT_BUTTON_EVENT, SELECT_EVENT_DROPDOWN_EVENT, TAB_ADD_EVENT, TAB_MODIFY_EVENT, TAB_DELETE_EVENT, TAB_ADD_BACKGROUND, HIDE_ERROR_EVENT, ADD_BACKGROUND_BUTTON_EVENT};
+//! 宿主渲染层：把 ClaraLight 视图模型翻译成 AstroBox 元素树，并按指纹去重重建（E-17 / E-20）。
+//!
+//! 结构：状态面板 → 分段控制器 → 子页头（仅子页）→ 概览卡片 / 事件列表 / 表单 → 底部单一主操作。
 
-pub fn build_add_event_ui(state: &UiState) -> ui::Element {
-    let container = ui::Element::new(ui::ElementType::Div, None)
-        .flex()
-        .flex_direction(ui::FlexDirection::Column);
+use crate::astrobox::psys_host_v4::ui;
+use crate::ui::state::write_state;
+use crate::ui::theme;
+use crate::ui::view::{
+    should_render, ActionView, CardBlock, EventListView, FieldView, FormView, HeaderView, SegmentView, StatusView,
+    ViewModel,
+};
+use crate::ui::widgets as w;
 
-    let event_name_label = ui::Element::new(ui::ElementType::P, Some("输入事件名称"))
-        .size(16)
-        .margin_bottom(8);
-    let event_name_input = ui::Element::new(ui::ElementType::Input, Some(&state.event_data.name))
-        .on(ui::Event::Change, EVENT_NAME_INPUT_EVENT)
-        .radius(8)
-        .bg("#2A2A2A")
-        .width_full()
-        .margin_bottom(8);
-
-    let event_time_label = ui::Element::new(
-        ui::ElementType::P,
-        Some("输入事件目标日（格式必须为YYYY-MM-DD）"),
-    )
-    .size(16)
-    .margin_bottom(8);
-    let event_time_input = ui::Element::new(ui::ElementType::Input, Some(&state.event_data.time))
-        .on(ui::Event::Change, EVENT_TIME_INPUT_EVENT)
-        .radius(8)
-        .bg("#2A2A2A")
-        .width_full()
-        .margin_bottom(8);
-
-    let on_index_container = ui::Element::new(ui::ElementType::Div, None)
-        .relative()
-        .margin_bottom(8)
-        .height(40)
-        .width_full();
-    let on_index_label = ui::Element::new(ui::ElementType::P, Some("是否显示在主页"))
-        .absolute()
-        .size(16)
-        .left(0)
-        .top(10);
-    let on_index_buttons = ui::Element::new(ui::ElementType::Div, None)
-        .absolute()
-        .flex()
-        .flex_direction(ui::FlexDirection::Row)
-        .right(0)
-        .top(5);
-    let on_index_yes = ui::Element::new(ui::ElementType::Button, Some("是"))
-        .without_default_styles()
-        .on(ui::Event::Click, ON_INDEX_YES_EVENT)
-        .on(ui::Event::MouseEnter, ON_INDEX_YES_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8)
-        .padding_top(8)
-        .padding_right(25)
-        .padding_bottom(8)
-        .padding_left(25)
-        .bg(if state.event_data.on_index {
-            "#424242"
-        } else if state.hovered_button.as_deref() == Some(ON_INDEX_YES_EVENT) {
-            "#4b4b4b"
-        } else {
-            "#2A2A2A"
-        })
-        .margin_right(5);
-    let on_index_no = ui::Element::new(ui::ElementType::Button, Some("否"))
-        .without_default_styles()
-        .on(ui::Event::Click, ON_INDEX_NO_EVENT)
-        .on(ui::Event::MouseEnter, ON_INDEX_NO_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8)
-        .padding_top(8)
-        .padding_right(25)
-        .padding_bottom(8)
-        .padding_left(25)
-        .bg(if !state.event_data.on_index {
-            "#424242"
-        } else if state.hovered_button.as_deref() == Some(ON_INDEX_NO_EVENT) {
-            "#4b4b4b"
-        } else {
-            "#2A2A2A"
-        });
-
-    let if_staring_day_container = ui::Element::new(ui::ElementType::Div, None)
-        .relative()
-        .margin_bottom(8)
-        .height(40)
-        .width_full();
-    let if_staring_day_label = ui::Element::new(ui::ElementType::P, Some("是否计入起始日"))
-        .absolute()
-        .size(16)
-        .left(0)
-        .top(10);
-    let if_staring_day_buttons = ui::Element::new(ui::ElementType::Div, None)
-        .absolute()
-        .flex()
-        .flex_direction(ui::FlexDirection::Row)
-        .right(0)
-        .top(5);
-    let if_staring_day_yes = ui::Element::new(ui::ElementType::Button, Some("是"))
-        .without_default_styles()
-        .on(ui::Event::Click, IF_STARING_DAY_YES_EVENT)
-        .on(ui::Event::MouseEnter, IF_STARING_DAY_YES_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8)
-        .padding_top(8)
-        .padding_right(25)
-        .padding_bottom(8)
-        .padding_left(25)
-        .bg(if state.event_data.if_staring_day {
-            "#424242"
-        } else if state.hovered_button.as_deref() == Some(IF_STARING_DAY_YES_EVENT) {
-            "#4b4b4b"
-        } else {
-            "#2A2A2A"
-        })
-        .margin_right(5);
-    let if_staring_day_no = ui::Element::new(ui::ElementType::Button, Some("否"))
-        .without_default_styles()
-        .on(ui::Event::Click, IF_STARING_DAY_NO_EVENT)
-        .on(ui::Event::MouseEnter, IF_STARING_DAY_NO_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8)
-        .padding_top(8)
-        .padding_right(25)
-        .padding_bottom(8)
-        .padding_left(25)
-        .bg(if !state.event_data.if_staring_day {
-            "#424242"
-        } else if state.hovered_button.as_deref() == Some(IF_STARING_DAY_NO_EVENT) {
-            "#4b4b4b"
-        } else {
-            "#2A2A2A"
-        });
-
-    let add_event_button = ui::Element::new(ui::ElementType::Button, Some("发送"))
-        .without_default_styles()
-        .on(ui::Event::Click, ADD_EVENT_BUTTON_EVENT)
-        .on(ui::Event::MouseEnter, ADD_EVENT_BUTTON_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8)
-        .padding(14)
-        .margin_top(10)
-        .bg(
-            if state.hovered_button.as_deref() == Some(ADD_EVENT_BUTTON_EVENT) {
-                "#4b4b4b"
-            } else {
-                "#2A2A2A"
-            },
-        )
-        .width_full();
-
-    container
-        .child(
-            ui::Element::new(ui::ElementType::Div, None)
-                .child(event_name_label)
-                .child(event_name_input),
-        )
-        .child(
-            ui::Element::new(ui::ElementType::Div, None)
-                .child(event_time_label)
-                .child(event_time_input),
-        )
-        .child(
-            on_index_container
-                .child(on_index_label)
-                .child(on_index_buttons.child(on_index_yes).child(on_index_no)),
-        )
-        .child(
-            if_staring_day_container.child(if_staring_day_label).child(
-                if_staring_day_buttons
-                    .child(if_staring_day_yes)
-                    .child(if_staring_day_no),
-            ),
-        )
-        .child(add_event_button)
+fn segments(items: &[SegmentView]) -> ui::Element {
+    let borrowed: Vec<(String, String, bool)> = items
+        .iter()
+        .map(|segment| (segment.label.to_string(), segment.id.as_str(), segment.active))
+        .collect();
+    let refs: Vec<(&str, &str, bool)> = borrowed
+        .iter()
+        .map(|(label, event, active)| (label.as_str(), event.as_str(), *active))
+        .collect();
+    w::segmented_control(&refs)
 }
 
-pub fn build_modify_event_ui(state: &UiState) -> ui::Element {
-    let container = ui::Element::new(ui::ElementType::Div, None)
-        .flex()
-        .flex_direction(ui::FlexDirection::Column);
+fn status_panel(status: &StatusView) -> ui::Element {
+    w::status_panel(status.kind, &status.text, &status.dismiss_id.as_str())
+}
 
-    let select_event_label = ui::Element::new(ui::ElementType::P, Some("在这里选择你要修改的事件"))
-        .size(16)
-        .margin_bottom(8);
-    let select_event_text = if state.selected_event_name.is_some() {
-        state.selected_event_name.as_deref().unwrap_or("")
-    } else {
-        "选择事件"
-    };
-    let mut select_event_dropdown =
-        ui::Element::new(ui::ElementType::Select, Some(select_event_text))
-            .on(ui::Event::Change, SELECT_EVENT_DROPDOWN_EVENT)
-            .radius(8)
-            .padding(12)
-            .bg("#2A2A2A")
-            .width_full()
-            .margin_bottom(8);
+fn header(header: &HeaderView) -> ui::Element {
+    w::subpage_header(header.title, &header.description, &header.back_id.as_str())
+}
 
-    if state.all_events.is_empty() {
-        let option = ui::Element::new(ui::ElementType::Option, Some("选择事件"));
-        select_event_dropdown = select_event_dropdown.child(option);
-    } else {
-        for (index, event_data) in state.all_events.iter().enumerate() {
-            let option_text = format!("{}　{}", index + 1, event_data.name);
-            let option = ui::Element::new(ui::ElementType::Option, Some(&option_text));
-            select_event_dropdown = select_event_dropdown.child(option);
+fn cards(blocks: &[CardBlock]) -> Vec<ui::Element> {
+    blocks
+        .iter()
+        .map(|block| match block {
+            CardBlock::Note { title, description, symbol } => w::note_card(title, description, symbol),
+            CardBlock::Actionable { title, description, symbol, event } => {
+                w::action_card(title, description, symbol, event)
+            }
+        })
+        .collect()
+}
+
+fn list(list: &EventListView) -> ui::Element {
+    let mut element = w::panel().child(w::text(list.title, theme::font_card_title(), theme::TEXT));
+    element = element.child(w::hint(list.description));
+    for row in &list.rows {
+        element = element.child(w::event_row(&row.label, &row.detail, &row.id, row.selected, row.navigates));
+    }
+    if list.max_page > 1 {
+        element = element.child(w::pager(list.page, list.max_page, &list.prev_id.as_str(), &list.next_id.as_str()));
+    }
+    // 空列表的引导文案统一放在脚注里，不重复渲染
+    element.child(w::hint(&list.footnote))
+}
+
+fn field(field: &FieldView) -> ui::Element {
+    match field {
+        FieldView::Text { id, value, label, hint } => {
+            w::field_block(label, w::input(value, hint, &id.as_str()), hint)
         }
+        FieldView::Switch { on_id, off_id, on, label, hint } => w::field_block(
+            label,
+            w::switch_pair("是", "否", &on_id.as_str(), &off_id.as_str(), *on),
+            hint,
+        ),
     }
-
-    let event_name_label = ui::Element::new(ui::ElementType::P, Some("输入事件名称"))
-        .size(16)
-        .margin_bottom(8);
-    let event_name_input =
-        ui::Element::new(ui::ElementType::Input, Some(&state.modify_event_data.name))
-            .on(ui::Event::Change, MODIFY_EVENT_NAME_INPUT_EVENT)
-            .radius(8)
-            .bg("#2A2A2A")
-            .width_full()
-            .margin_bottom(8);
-
-    let event_time_label = ui::Element::new(
-        ui::ElementType::P,
-        Some("输入事件目标日（格式必须为YYYY-MM-DD）"),
-    )
-    .size(16)
-    .margin_bottom(8);
-    let event_time_input =
-        ui::Element::new(ui::ElementType::Input, Some(&state.modify_event_data.time))
-            .on(ui::Event::Change, MODIFY_EVENT_TIME_INPUT_EVENT)
-            .radius(8)
-            .bg("#2A2A2A")
-            .width_full()
-            .margin_bottom(8);
-
-    let on_index_container = ui::Element::new(ui::ElementType::Div, None)
-        .relative()
-        .margin_bottom(8)
-        .height(40)
-        .width_full();
-    let on_index_label = ui::Element::new(ui::ElementType::P, Some("是否显示在主页"))
-        .absolute()
-        .size(16)
-        .left(0)
-        .top(10);
-    let on_index_buttons = ui::Element::new(ui::ElementType::Div, None)
-        .absolute()
-        .flex()
-        .flex_direction(ui::FlexDirection::Row)
-        .right(0)
-        .top(5);
-    let on_index_yes = ui::Element::new(ui::ElementType::Button, Some("是"))
-        .without_default_styles()
-        .on(ui::Event::Click, MODIFY_ON_INDEX_YES_EVENT)
-        .on(ui::Event::MouseEnter, MODIFY_ON_INDEX_YES_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8)
-        .padding_top(8)
-        .padding_right(25)
-        .padding_bottom(8)
-        .padding_left(25)
-        .bg(if state.modify_event_data.on_index {
-            "#424242"
-        } else if state.hovered_button.as_deref() == Some(MODIFY_ON_INDEX_YES_EVENT) {
-            "#4b4b4b"
-        } else {
-            "#2A2A2A"
-        })
-        .margin_right(5);
-    let on_index_no = ui::Element::new(ui::ElementType::Button, Some("否"))
-        .without_default_styles()
-        .on(ui::Event::Click, MODIFY_ON_INDEX_NO_EVENT)
-        .on(ui::Event::MouseEnter, MODIFY_ON_INDEX_NO_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8)
-        .padding_top(8)
-        .padding_right(25)
-        .padding_bottom(8)
-        .padding_left(25)
-        .bg(if !state.modify_event_data.on_index {
-            "#424242"
-        } else if state.hovered_button.as_deref() == Some(MODIFY_ON_INDEX_NO_EVENT) {
-            "#4b4b4b"
-        } else {
-            "#2A2A2A"
-        });
-
-    let if_staring_day_container = ui::Element::new(ui::ElementType::Div, None)
-        .relative()
-        .margin_bottom(8)
-        .height(40)
-        .width_full();
-    let if_staring_day_label = ui::Element::new(ui::ElementType::P, Some("是否计入起始日"))
-        .absolute()
-        .size(16)
-        .left(0)
-        .top(10);
-    let if_staring_day_buttons = ui::Element::new(ui::ElementType::Div, None)
-        .absolute()
-        .flex()
-        .flex_direction(ui::FlexDirection::Row)
-        .right(0)
-        .top(5);
-    let if_staring_day_yes = ui::Element::new(ui::ElementType::Button, Some("是"))
-        .without_default_styles()
-        .on(ui::Event::Click, MODIFY_IF_STARING_DAY_YES_EVENT)
-        .on(ui::Event::MouseEnter, MODIFY_IF_STARING_DAY_YES_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8)
-        .padding_top(8)
-        .padding_right(25)
-        .padding_bottom(8)
-        .padding_left(25)
-        .bg(if state.modify_event_data.if_staring_day {
-            "#424242"
-        } else if state.hovered_button.as_deref() == Some(MODIFY_IF_STARING_DAY_YES_EVENT) {
-            "#4b4b4b"
-        } else {
-            "#2A2A2A"
-        })
-        .margin_right(5);
-    let if_staring_day_no = ui::Element::new(ui::ElementType::Button, Some("否"))
-        .without_default_styles()
-        .on(ui::Event::Click, MODIFY_IF_STARING_DAY_NO_EVENT)
-        .on(ui::Event::MouseEnter, MODIFY_IF_STARING_DAY_NO_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8)
-        .padding_top(8)
-        .padding_right(25)
-        .padding_bottom(8)
-        .padding_left(25)
-        .bg(if !state.modify_event_data.if_staring_day {
-            "#424242"
-        } else if state.hovered_button.as_deref() == Some(MODIFY_IF_STARING_DAY_NO_EVENT) {
-            "#4b4b4b"
-        } else {
-            "#2A2A2A"
-        });
-
-    let get_events_button = ui::Element::new(ui::ElementType::Button, Some("获取手环端数据"))
-        .without_default_styles()
-        .on(ui::Event::Click, GET_EVENTS_BUTTON_EVENT)
-        .on(ui::Event::MouseEnter, GET_EVENTS_BUTTON_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8)
-        .padding(14)
-        .bg(
-            if state.hovered_button.as_deref() == Some(GET_EVENTS_BUTTON_EVENT) {
-                "#4b4b4b"
-            } else {
-                "#2A2A2A"
-            },
-        )
-        .width_full()
-        .margin_bottom(8);
-
-    let sync_button = ui::Element::new(ui::ElementType::Button, Some("同步"))
-        .without_default_styles()
-        .on(ui::Event::Click, CHANGE_EVENT_BUTTON_EVENT)
-        .on(ui::Event::MouseEnter, CHANGE_EVENT_BUTTON_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8)
-        .padding(14)
-        .bg(
-            if state.hovered_button.as_deref() == Some(CHANGE_EVENT_BUTTON_EVENT) {
-                "#4b4b4b"
-            } else {
-                "#2A2A2A"
-            },
-        )
-        .width_full();
-
-    let button_group = if state.has_fetched_events {
-        ui::Element::new(ui::ElementType::Div, None)
-            .flex()
-            .flex_direction(ui::FlexDirection::Column)
-            .child(sync_button)
-    } else {
-        ui::Element::new(ui::ElementType::Div, None)
-            .flex()
-            .flex_direction(ui::FlexDirection::Column)
-            .child(get_events_button)
-    };
-
-    container
-        .child(
-            ui::Element::new(ui::ElementType::Div, None)
-                .child(select_event_label)
-                .child(select_event_dropdown),
-        )
-        .child(
-            ui::Element::new(ui::ElementType::Div, None)
-                .child(event_name_label)
-                .child(event_name_input),
-        )
-        .child(
-            ui::Element::new(ui::ElementType::Div, None)
-                .child(event_time_label)
-                .child(event_time_input),
-        )
-        .child(
-            on_index_container
-                .child(on_index_label)
-                .child(on_index_buttons.child(on_index_yes).child(on_index_no)),
-        )
-        .child(
-            if_staring_day_container.child(if_staring_day_label).child(
-                if_staring_day_buttons
-                    .child(if_staring_day_yes)
-                    .child(if_staring_day_no),
-            ),
-        )
-        .child(button_group)
 }
 
-pub fn build_delete_event_ui(state: &UiState) -> ui::Element {
-    let container = ui::Element::new(ui::ElementType::Div, None)
-        .flex()
-        .flex_direction(ui::FlexDirection::Column);
+fn form(form: &FormView) -> ui::Element {
+    let mut element = w::panel().child(w::text(form.title, theme::font_card_title(), theme::TEXT));
+    element = element.child(w::hint(&form.description));
+    for field in &form.fields {
+        element = element.child(self::field(field));
+    }
+    element
+}
 
-    let select_event_label = ui::Element::new(ui::ElementType::P, Some("在这里选择你要删除的事件"))
-        .size(16)
-        .margin_bottom(8);
-    let select_event_text = if state.selected_event_name.is_some() {
-        state.selected_event_name.as_deref().unwrap_or("")
-    } else {
-        "选择事件"
-    };
-    let mut select_event_dropdown = ui::Element::new(ui::ElementType::Select, Some(select_event_text))
-        .on(ui::Event::Change, SELECT_EVENT_DROPDOWN_EVENT)
-        .radius(8)
-        .padding(12)
-        .bg("#2A2A2A")
-        .width_full()
-        .margin_bottom(8);
-
-    if state.all_events.is_empty() {
-        let option = ui::Element::new(ui::ElementType::Option, Some("选择事件"));
-        select_event_dropdown = select_event_dropdown.child(option);
-    } else {
-        for (index, event_data) in state.all_events.iter().enumerate() {
-            let option_text = format!("{}　{}", index + 1, event_data.name);
-            let option = ui::Element::new(ui::ElementType::Option, Some(&option_text));
-            select_event_dropdown = select_event_dropdown.child(option);
+fn action_bar(primary: &Option<ActionView>, secondary: &Option<ActionView>) -> ui::Element {
+    let mut element = w::row().gap(theme::GAP_SM);
+    if let Some(action) = secondary {
+        element = element.child(w::button(&action.label, &action.id.as_str(), action.kind, action.enabled).flex_grow(1.0));
+    }
+    if let Some(action) = primary {
+        let mut button = w::button(&action.label, &action.id.as_str(), action.kind, action.enabled);
+        if secondary.is_none() {
+            button = button.width_full();
+        } else {
+            button = button.flex_grow(1.0);
         }
+        element = element.child(button);
     }
-
-    let get_events_button = ui::Element::new(ui::ElementType::Button, Some("获取手环端数据"))
-        .without_default_styles()
-        .on(ui::Event::Click, GET_EVENTS_BUTTON_EVENT)
-        .on(ui::Event::MouseEnter, GET_EVENTS_BUTTON_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8)
-        .padding(14)
-        .bg(
-            if state.hovered_button.as_deref() == Some(GET_EVENTS_BUTTON_EVENT) {
-                "#4b4b4b"
-            } else {
-                "#2A2A2A"
-            },
-        )
-        .width_full()
-        .margin_bottom(8);
-
-    let delete_button = ui::Element::new(ui::ElementType::Button, Some("删除"))
-        .without_default_styles()
-        .on(ui::Event::Click, DELETE_EVENT_BUTTON_EVENT)
-        .on(ui::Event::MouseEnter, DELETE_EVENT_BUTTON_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8)
-        .padding(14)
-        .bg(
-            if state.hovered_button.as_deref() == Some(DELETE_EVENT_BUTTON_EVENT) {
-                "#4b4b4b"
-            } else {
-                "#2A2A2A"
-            },
-        )
-        .width_full();
-
-    let button_group = if state.has_fetched_events {
-        ui::Element::new(ui::ElementType::Div, None)
-            .flex()
-            .flex_direction(ui::FlexDirection::Column)
-            .child(delete_button)
-    } else {
-        ui::Element::new(ui::ElementType::Div, None)
-            .flex()
-            .flex_direction(ui::FlexDirection::Column)
-            .child(get_events_button)
-    };
-
-    container
-        .child(
-            ui::Element::new(ui::ElementType::Div, None)
-                .child(select_event_label)
-                .child(select_event_dropdown),
-        )
-        .child(button_group)
+    element
 }
 
-pub fn build_add_background_ui(state: &UiState) -> ui::Element {
-    let container = ui::Element::new(ui::ElementType::Div, None)
-        .flex()
-        .flex_direction(ui::FlexDirection::Column);
-
-    let description = ui::Element::new(ui::ElementType::P, Some("点击下方按钮选择背景图片，支持 PNG、JPG、JPEG 格式"))
-        .size(16)
-        .margin_bottom(20);
-
-    let add_background_button = ui::Element::new(ui::ElementType::Button, Some("选择背景图片"))
-        .without_default_styles()
-        .on(ui::Event::Click, ADD_BACKGROUND_BUTTON_EVENT)
-        .on(ui::Event::MouseEnter, ADD_BACKGROUND_BUTTON_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8)
-        .padding(14)
-        .bg(
-            if state.hovered_button.as_deref() == Some(ADD_BACKGROUND_BUTTON_EVENT) {
-                "#4b4b4b"
-            } else {
-                "#2A2A2A"
-            },
-        )
-        .width_full();
-
-    container
-        .child(description)
-        .child(add_background_button)
-}
-
-pub fn build_main_ui() -> ui::Element {
-    let state = ui_state()
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    let main_container = ui::Element::new(ui::ElementType::Div, None)
-        .flex()
-        .flex_direction(ui::FlexDirection::Column)
-        .width_full()
-        .padding(20);
-
-    let error_element = if let Some(ref msg) = state.error_message {
-        let bg_color = if state.is_success_message {
-            "#4CAF50"
-        } else {
-            "#FF4444"
-        };
-        Some(
-            ui::Element::new(ui::ElementType::Div, None)
-                .bg(bg_color)
-                .radius(8)
-                .padding(12)
-                .margin_bottom(20)
-                .on(ui::Event::Click, HIDE_ERROR_EVENT)
-                .child(
-                    ui::Element::new(ui::ElementType::P, Some(msg))
-                        .size(14)
-                        .text_color("#FFFFFF"),
-                ),
-        )
-    } else {
-        None
-    };
-
-    let tabs_wrapper = ui::Element::new(ui::ElementType::Div, None)
-        .flex()
-        .justify_center();
-
-    let tab_container = ui::Element::new(ui::ElementType::Div, None)
-        .flex()
-        .flex_direction(ui::FlexDirection::Row)
-        .margin_bottom(20)
-        .bg("#1E1E1F")
-        .radius(8);
-
-    let add_event_tab = ui::Element::new(ui::ElementType::Button, Some("添加事件"))
-        .without_default_styles()
-        .padding_left(20)
-        .padding_right(20)
-        .padding_top(12)
-        .padding_bottom(12)
-        .margin(5)
-        .bg(if state.current_tab == EventType::AddEvent {
-            "#424242"
-        } else if state.hovered_button.as_deref() == Some(TAB_ADD_EVENT) {
-            "#4b4b4b"
-        } else {
-            "#2A2A2A"
-        })
-        .on(ui::Event::Click, TAB_ADD_EVENT)
-        .on(ui::Event::MouseEnter, TAB_ADD_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8);
-
-    let modify_event_tab = ui::Element::new(ui::ElementType::Button, Some("修改事件"))
-        .without_default_styles()
-        .padding_left(20)
-        .padding_right(20)
-        .padding_top(12)
-        .padding_bottom(12)
-        .margin(5)
-        .bg(if state.current_tab == EventType::ModifyEvent {
-            "#424242"
-        } else if state.hovered_button.as_deref() == Some(TAB_MODIFY_EVENT) {
-            "#4b4b4b"
-        } else {
-            "#2A2A2A"
-        })
-        .on(ui::Event::Click, TAB_MODIFY_EVENT)
-        .on(ui::Event::MouseEnter, TAB_MODIFY_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8);
-
-    let delete_event_tab = ui::Element::new(ui::ElementType::Button, Some("删除事件"))
-        .without_default_styles()
-        .padding_left(20)
-        .padding_right(20)
-        .padding_top(12)
-        .padding_bottom(12)
-        .margin(5)
-        .bg(if state.current_tab == EventType::DeleteEvent {
-            "#424242"
-        } else if state.hovered_button.as_deref() == Some(TAB_DELETE_EVENT) {
-            "#4b4b4b"
-        } else {
-            "#2A2A2A"
-        })
-        .on(ui::Event::Click, TAB_DELETE_EVENT)
-        .on(ui::Event::MouseEnter, TAB_DELETE_EVENT)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8);
-
-    let add_background_tab = ui::Element::new(ui::ElementType::Button, Some("添加背景"))
-        .without_default_styles()
-        .padding_left(20)
-        .padding_right(20)
-        .padding_top(12)
-        .padding_bottom(12)
-        .margin(5)
-        .bg(if state.current_tab == EventType::AddBackground {
-            "#424242"
-        } else if state.hovered_button.as_deref() == Some(TAB_ADD_BACKGROUND) {
-            "#4b4b4b"
-        } else {
-            "#2A2A2A"
-        })
-        .on(ui::Event::Click, TAB_ADD_BACKGROUND)
-        .on(ui::Event::MouseEnter, TAB_ADD_BACKGROUND)
-        .on(ui::Event::MouseLeave, BUTTON_MOUSE_LEAVE)
-        .radius(8);
-
-    let tabs = tab_container
-        .child(add_event_tab)
-        .child(modify_event_tab)
-        .child(delete_event_tab)
-        .child(add_background_tab);
-
-    let content_container = ui::Element::new(ui::ElementType::Div, None)
-        .flex()
-        .flex_direction(ui::FlexDirection::Column)
-        .padding_top(20)
-        .padding_bottom(20);
-
-    let content = match state.current_tab {
-        EventType::AddEvent => build_add_event_ui(&state),
-        EventType::ModifyEvent => build_modify_event_ui(&state),
-        EventType::DeleteEvent => build_delete_event_ui(&state),
-        EventType::AddBackground => build_add_background_ui(&state),
-    };
-
-    let tabs_wrapper = tabs_wrapper.child(tabs);
-
-    let mut main_container = main_container;
-
-    if let Some(error) = error_element {
-        main_container = main_container.child(error);
+pub fn build_tree(view: &ViewModel) -> ui::Element {
+    let mut root = w::column().bg(theme::CANVAS).padding(theme::PAD).gap(theme::GAP);
+    if let Some(status) = &view.status {
+        root = root.child(status_panel(status));
     }
-
-    main_container
-        .child(tabs_wrapper)
-        .child(content_container.child(content))
+    root = root.child(segments(&view.segments));
+    if let Some(header) = &view.header {
+        root = root.child(self::header(header));
+    }
+    for card in cards(&view.cards) {
+        root = root.child(card);
+    }
+    if let Some(list) = &view.list {
+        root = root.child(self::list(list));
+    }
+    if let Some(form) = &view.form {
+        root = root.child(self::form(form));
+    }
+    root.child(action_bar(&view.primary, &view.secondary))
 }
 
+pub struct RenderRequest {
+    root_id: String,
+    tree: ui::Element,
+}
+
+/// 持锁时只准备纯渲染请求；不调用宿主，避免锁重入与宿主回调死锁。
+pub fn prepare_with(state: &mut crate::ui::state::UiState, force: bool) -> Option<RenderRequest> {
+    let Some(view) = should_render(state, force) else {
+        return None;
+    };
+    let Some(root_id) = state.root_element_id.clone() else {
+        return None;
+    };
+    Some(RenderRequest { root_id, tree: build_tree(&view) })
+}
+
+/// 必须在状态锁释放后调用宿主渲染。
+pub fn render_prepared(request: Option<RenderRequest>) {
+    if let Some(request) = request {
+        ui::render(&request.root_id, request.tree);
+    }
+}
+
+/// 调用方未持锁时使用：内部取锁后渲染
+pub fn refresh(force: bool) {
+    let request = {
+        let mut state = write_state();
+        prepare_with(&mut state, force)
+    };
+    render_prepared(request);
+}
+
+/// 宿主请求渲染根元素：总是重画（首次渲染 / 宿主主动刷新）
 pub fn render_main_ui(element_id: &str) {
-    let mut state = ui_state()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    state.root_element_id = Some(element_id.to_string());
-    drop(state);
-    psys_host::ui::render(element_id, build_main_ui());
+    let request = {
+        let mut state = write_state();
+        state.root_element_id = Some(element_id.to_string());
+        prepare_with(&mut state, true)
+    };
+    render_prepared(request);
 }

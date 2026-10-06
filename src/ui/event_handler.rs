@@ -1,822 +1,245 @@
-use crate::astrobox::psys_host::{self, ui, dialog};
-use serde_json::Value;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use image::{ImageReader, imageops::FilterType, GenericImageView};
-use std::io::Cursor;
-use super::state::*;
-use super::message::*;
-use super::validation::*;
-use super::build::build_main_ui;
+//! 宿主事件入口：UI 事件 → 表驱动派发 → 状态变换 → 按需重建；互联消息与定时器分别落地。
 
-pub const TAB_CHANGE_EVENT: &str = "tab_change";
-pub const EVENT_NAME_INPUT_EVENT: &str = "event_name_input";
-pub const EVENT_TIME_INPUT_EVENT: &str = "event_time_input";
-pub const ON_INDEX_CHANGE_EVENT: &str = "on_index_change";
-pub const ON_INDEX_YES_EVENT: &str = "on_index_yes";
-pub const ON_INDEX_NO_EVENT: &str = "on_index_no";
-pub const IF_STARING_DAY_CHANGE_EVENT: &str = "if_staring_day_change";
-pub const IF_STARING_DAY_YES_EVENT: &str = "if_staring_day_yes";
-pub const IF_STARING_DAY_NO_EVENT: &str = "if_staring_day_no";
-pub const MODIFY_EVENT_NAME_INPUT_EVENT: &str = "modify_event_name_input";
-pub const MODIFY_EVENT_TIME_INPUT_EVENT: &str = "modify_event_time_input";
-pub const MODIFY_ON_INDEX_CHANGE_EVENT: &str = "modify_on_index_change";
-pub const MODIFY_ON_INDEX_YES_EVENT: &str = "modify_on_index_yes";
-pub const MODIFY_ON_INDEX_NO_EVENT: &str = "modify_on_index_no";
-pub const MODIFY_IF_STARING_DAY_CHANGE_EVENT: &str = "modify_if_staring_day_change";
-pub const MODIFY_IF_STARING_DAY_YES_EVENT: &str = "modify_if_staring_day_yes";
-pub const MODIFY_IF_STARING_DAY_NO_EVENT: &str = "modify_if_staring_day_no";
-pub const ADD_EVENT_BUTTON_EVENT: &str = "add_event_button";
-pub const GET_EVENTS_BUTTON_EVENT: &str = "get_events_button";
-pub const CHANGE_EVENT_BUTTON_EVENT: &str = "change_event_button";
-pub const DELETE_EVENT_BUTTON_EVENT: &str = "delete_event_button";
-pub const SELECT_EVENT_DROPDOWN_EVENT: &str = "select_event_dropdown";
-pub const TAB_ADD_EVENT: &str = "tab_add_event";
-pub const TAB_MODIFY_EVENT: &str = "tab_modify_event";
-pub const TAB_DELETE_EVENT: &str = "tab_delete_event";
-pub const TAB_ADD_BACKGROUND: &str = "tab_add_background";
-pub const HIDE_ERROR_EVENT: &str = "hide_error";
-pub const BUTTON_MOUSE_LEAVE: &str = "button_mouse_leave";
-pub const ADD_BACKGROUND_BUTTON_EVENT: &str = "add_background_button";
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
-pub fn handle_interconnect_message(payload: &str) {
-    tracing::info!("收到手环端消息: {}", payload);
+use crate::astrobox::psys_host_v4::dialog::{pick_file, FilterConfig, PickConfig};
+use crate::ui::build;
+use crate::ui::dispatch::{self, Action, UiEventKind};
+use crate::ui::message::{self, SendStartError};
+use crate::ui::protocol::{self, EventRef};
+use crate::ui::state::{read_state, write_state, EventData, FormScope, SendPurpose, StatusKind, StatusMessage};
+use crate::ui::validation::validate_date_format;
 
-    if let Ok(json) = serde_json::from_str::<Value>(payload) {
-        let data_json = if let Some(payload_text) = json.get("payloadText").and_then(|v| v.as_str())
-        {
-            tracing::info!("从 payloadText 解析数据");
-            payload_text
-        } else {
-            tracing::info!("直接使用 payload 解析数据");
-            payload
-        };
+fn map_event_kind(event: &ui::Event) -> Option<UiEventKind> {
+    match event {
+        ui::Event::Click => Some(UiEventKind::Click),
+        ui::Event::Change => Some(UiEventKind::Change),
+        _ => None,
+    }
+}
 
-        if let Ok(data_json) = serde_json::from_str::<Value>(data_json) {
-            if let Some(data) = data_json.get("data") {
-                if let Some(events_array) = data.as_array() {
-                    tracing::info!("解析到 {} 个事件", events_array.len());
-                    let mut all_events = Vec::new();
-                    for event in events_array {
-                        if let Some(event_obj) = event.as_object() {
-                            let name = event_obj
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let date = event_obj
-                                .get("date")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let on_index = event_obj
-                                .get("on_index")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
-                            let if_staring_day = event_obj
-                                .get("IFStaringDay")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
+use crate::astrobox::psys_host_v4::ui;
 
-                            tracing::info!(
-                                "事件: name={}, date={}, on_index={}, if_staring_day={}",
-                                name,
-                                date,
-                                on_index,
-                                if_staring_day
-                            );
-                            all_events.push(EventData {
-                                name,
-                                time: date,
-                                on_index,
-                                if_staring_day,
-                            });
-                        }
+pub async fn ui_event_processor(event_type: ui::Event, event_id: &str, event_payload: &str) {
+    tracing::info!("UI 事件: id={}, type={:?}", event_id, event_type);
+    let Some(kind) = map_event_kind(&event_type) else {
+        return;
+    };
+    let Some(action) = dispatch::resolve(event_id, kind, event_payload) else {
+        return;
+    };
+    run_action(action).await;
+}
+
+async fn run_action(action: Action) {
+    let rebuild = {
+        let mut state = write_state();
+        dispatch::apply_action(&mut state, action.clone()).rebuild
+    };
+    if rebuild {
+        build::refresh(false);
+    }
+
+    match action {
+        Action::SubmitAdd => submit_add().await,
+        Action::SubmitModify => submit_modify().await,
+        Action::FetchEvents => {
+            if message::launch_then_send(protocol::get_all_events(), SendPurpose::Fetch).await
+                == Err(SendStartError::Busy)
+            {
+                message::set_status_timed(StatusKind::Info, "已有操作正在发送，请稍候");
+            }
+        }
+        Action::RequestDelete => request_delete().await,
+        Action::PickBackground => pick_background().await,
+        _ => {}
+    }
+}
+
+fn draft_of(scope: FormScope) -> EventData {
+    read_state().draft(scope).cloned().unwrap_or_default()
+}
+
+fn validate_draft(draft: &EventData) -> Option<String> {
+    if draft.name.trim().is_empty() {
+        return Some(dispatch::NAME_REQUIRED_TEXT.to_string());
+    }
+    if draft.name.trim().chars().count() > 50 {
+        return Some("事件名称最多 50 个字符".to_string());
+    }
+    validate_date_format(draft.time.trim()).err().map(|error| error.to_string())
+}
+
+async fn submit_add() {
+    let mut draft = draft_of(FormScope::Add);
+    draft.name = draft.name.trim().to_string();
+    draft.time = draft.time.trim().to_string();
+    if let Some(error) = validate_draft(&draft) {
+        message::set_status_timed(StatusKind::Error, &error);
+        return;
+    }
+    if message::launch_then_send(protocol::add_event(&draft), SendPurpose::Mutation).await
+        == Err(SendStartError::Busy)
+    {
+        message::set_status_timed(StatusKind::Info, "已有操作正在进行，请先同步腕端结果");
+    }
+}
+
+async fn submit_modify() {
+    let key = read_state().selected_event_key.clone();
+    let Some(key) = key else {
+        message::set_status_timed(StatusKind::Error, dispatch::NO_SELECTION_TEXT);
+        return;
+    };
+    if read_state().index_of_key(&key).is_none() {
+        message::set_status_timed(StatusKind::Error, "事件列表已变化，请重新获取后选择");
+        return;
+    }
+    let mut draft = draft_of(FormScope::Modify);
+    draft.name = draft.name.trim().to_string();
+    draft.time = draft.time.trim().to_string();
+    if let Some(error) = validate_draft(&draft) {
+        message::set_status_timed(StatusKind::Error, &error);
+        return;
+    }
+    let target = event_ref_for(&key);
+    match message::launch_then_send(protocol::change_event(&draft, &target), SendPurpose::Mutation).await {
+        Ok(_) => {
+            let mut state = write_state();
+            // 仅在命令进入发送流程后返回概览；腕端落盘结果需后续确认。
+            state.back_to_overview();
+            drop(state);
+            build::refresh(true);
+        }
+        Err(SendStartError::Busy) => message::set_status_timed(StatusKind::Info, "已有操作正在进行，请先同步腕端结果"),
+        Err(SendStartError::Unavailable) => {}
+    }
+}
+
+/// 选择键 → 协议定位：带 ID 用 ID，旧数据用下标（E-11）
+fn event_ref_for(key: &str) -> EventRef {
+    if let Some(id) = key.strip_prefix("id:") {
+        return EventRef::Id(id.to_string());
+    }
+    match key.strip_prefix("idx:").and_then(|text| text.parse::<usize>().ok()) {
+        Some(index) => EventRef::Index(index),
+        None => EventRef::Id(key.to_string()),
+    }
+}
+
+async fn request_delete() {
+    let (key, event) = {
+        let mut state = write_state();
+        if state.delete_dialog_open || state.busy() {
+            return;
+        }
+        let key = state.selected_event_key.clone();
+        let event = key
+            .as_deref()
+            .and_then(|key| state.index_of_key(key))
+            .and_then(|index| state.all_events.get(index).cloned());
+        if event.is_some() {
+            state.delete_dialog_open = true;
+        }
+        (key, event)
+    };
+    let (Some(key), Some(event)) = (key, event) else {
+        message::set_status_timed(StatusKind::Error, dispatch::NO_SELECTION_TEXT);
+        return;
+    };
+    let confirmed = message::confirm_delete(&event).await;
+    {
+        let mut state = write_state();
+        state.delete_dialog_open = false;
+    }
+    build::refresh(false);
+    if !confirmed {
+        message::set_status(StatusKind::Info, "已取消删除");
+        return;
+    }
+    let target_still_matches = {
+        let state = read_state();
+        state.selected_event_key.as_deref() == Some(key.as_str())
+            && state
+                .index_of_key(&key)
+                .and_then(|index| state.all_events.get(index))
+                .is_some_and(|current| {
+                    current.id == event.id && current.name == event.name && current.time == event.time
+                })
+    };
+    if !target_still_matches {
+        message::set_status_timed(StatusKind::Error, "腕端列表已变化，请重新获取并确认删除");
+        return;
+    }
+    // 不乐观删除：插件发出命令不等于腕端已落盘。等腕端回传列表确认后再移除。
+    match message::launch_then_send(protocol::delete_event(&event_ref_for(&key)), SendPurpose::Mutation).await {
+        Ok(_) | Err(SendStartError::Unavailable) => {}
+        Err(SendStartError::Busy) => message::set_status_timed(StatusKind::Info, "已有操作正在进行，请先同步腕端结果"),
+    }
+}
+
+async fn pick_background() {
+    let pick_config = PickConfig { read: true, copy_to: None };
+    let filter_config = FilterConfig {
+        multiple: false,
+        extensions: vec!["png".to_string(), "jpg".to_string(), "jpeg".to_string()],
+        default_directory: String::new(),
+        default_file_name: String::new(),
+    };
+    let picked = pick_file(pick_config, filter_config).await;
+    let Ok(picked) = picked else {
+        message::set_status_timed(StatusKind::Error, "未选择图片");
+        return;
+    };
+    match crate::ui::image::compress_for_watch(&picked.data) {
+        Ok(compressed) => {
+            if message::launch_then_send(
+                protocol::add_background(&STANDARD.encode(&compressed)),
+                SendPurpose::Background,
+            )
+            .await == Err(SendStartError::Busy)
+            {
+                message::set_status_timed(StatusKind::Info, "已有操作正在进行，请先同步腕端结果");
+            }
+        }
+        Err(error) => {
+            message::set_status_timed(StatusKind::Error, &error);
+        }
+    }
+}
+
+/// 腕端互联消息：解析事件列表并刷新界面（E-12 无效条目与越界防护）
+pub async fn handle_interconnect_message(payload: &str) {
+    match protocol::parse_event_list(payload) {
+        Ok(parsed) => {
+            let skipped = parsed.skipped;
+            let request = {
+                let mut state = write_state();
+                state.all_events = parsed.events;
+                state.has_fetched_events = true;
+                state.event_page = 0;
+                state.apply_confirmed_list(parsed.primary_id, parsed.revision);
+                if let Some(key) = state.selected_event_key.clone() {
+                    if state.index_of_key(&key).is_none() {
+                        state.clear_selection();
                     }
-
-                    let root_id: Option<String>;
-                    {
-                        let mut state = ui_state()
-                            .write()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        state.all_events = all_events;
-                        state.has_fetched_events = true;
-                        state.error_message = Some("获取手环端数据成功！".to_string());
-                        state.is_success_message = true;
-                        tracing::info!(
-                            "更新状态: all_events.len={}, error_message={:?}",
-                            state.all_events.len(),
-                            state.error_message
-                        );
-                        root_id = state.root_element_id.clone();
-                        tracing::info!("root_element_id: {:?}", root_id);
-                    }
-                    if let Some(root_id) = root_id {
-                        let ui = build_main_ui();
-                        psys_host::ui::render(&root_id, ui);
-                        tracing::info!("UI已重新渲染");
-                    } else {
-                        tracing::warn!("root_element_id 为 None，无法重新渲染UI");
-                    }
+                }
+                let text = if skipped > 0 {
+                    format!("{}（{} 条数据无效已跳过）", dispatch::FETCH_SUCCESS_TEXT, skipped)
                 } else {
-                    tracing::warn!("data 不是数组");
-                }
-            } else {
-                tracing::warn!("JSON 中没有 data 字段");
-            }
-        } else {
-            tracing::warn!("JSON 解析失败");
-        }
-    } else {
-        tracing::warn!("JSON 解析失败");
-    }
-}
-
-fn handle_input_event(event: &str, value: &str) {
-    let mut state = ui_state()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    let parsed_value = if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
-        json.get("value")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    } else {
-        value.to_string()
-    };
-
-    match event {
-        EVENT_NAME_INPUT_EVENT => {
-            state.event_data.name = parsed_value;
-            state.error_message = None;
-        }
-        EVENT_TIME_INPUT_EVENT => {
-            state.event_data.time = parsed_value;
-            state.error_message = None;
-        }
-        MODIFY_EVENT_NAME_INPUT_EVENT => {
-            state.modify_event_data.name = parsed_value;
-        }
-        MODIFY_EVENT_TIME_INPUT_EVENT => {
-            state.modify_event_data.time = parsed_value;
-        }
-        _ => {
-            tracing::info!("未处理的事件类型");
-        }
-    }
-}
-
-fn handle_dropdown_event(event: &str, value: &str) {
-    let root_id: Option<String>;
-    {
-        let mut state = ui_state()
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let parsed_value = if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
-            json.get("value")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        } else {
-            value.to_string()
-        };
-
-        root_id = state.root_element_id.clone();
-
-        match event {
-            ON_INDEX_CHANGE_EVENT => {
-                state.event_data.on_index = parsed_value == "是";
-            }
-            IF_STARING_DAY_CHANGE_EVENT => {
-                state.event_data.if_staring_day = parsed_value == "是";
-            }
-            MODIFY_ON_INDEX_CHANGE_EVENT => {
-                state.modify_event_data.on_index = parsed_value == "是";
-            }
-            MODIFY_IF_STARING_DAY_CHANGE_EVENT => {
-                state.modify_event_data.if_staring_day = parsed_value == "是";
-            }
-            SELECT_EVENT_DROPDOWN_EVENT => {
-                if let Some(space_idx) = parsed_value.find("　") {
-                    if let Ok(index) = parsed_value[..space_idx].parse::<usize>() {
-                        state.selected_event_index = Some(index - 1);
-                        if let Some(event_data) = state.all_events.get(index - 1).cloned() {
-                            state.modify_event_data.name = event_data.name.clone();
-                            state.modify_event_data.time = event_data.time;
-                            state.modify_event_data.on_index = event_data.on_index;
-                            state.modify_event_data.if_staring_day = event_data.if_staring_day;
-                            state.selected_event_name = Some(parsed_value);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if let Some(root_id) = root_id {
-        let ui = build_main_ui();
-        psys_host::ui::render(&root_id, ui);
-    }
-}
-
-fn handle_button_click(event: &str) {
-    match event {
-        ON_INDEX_YES_EVENT => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.event_data.on_index = true;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
-        }
-        ON_INDEX_NO_EVENT => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.event_data.on_index = false;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
-        }
-        IF_STARING_DAY_YES_EVENT => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.event_data.if_staring_day = true;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
-        }
-        IF_STARING_DAY_NO_EVENT => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.event_data.if_staring_day = false;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
-        }
-        MODIFY_ON_INDEX_YES_EVENT => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.modify_event_data.on_index = true;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
-        }
-        MODIFY_ON_INDEX_NO_EVENT => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.modify_event_data.on_index = false;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
-        }
-        MODIFY_IF_STARING_DAY_YES_EVENT => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.modify_event_data.if_staring_day = true;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
-        }
-        MODIFY_IF_STARING_DAY_NO_EVENT => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.modify_event_data.if_staring_day = false;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
-        }
-        ADD_EVENT_BUTTON_EVENT => {
-            let (event_name, event_time, on_index, if_staring_day) = {
-                let state = ui_state()
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                (
-                    state.event_data.name.clone(),
-                    state.event_data.time.clone(),
-                    state.event_data.on_index,
-                    state.event_data.if_staring_day,
-                )
-            };
-
-            let error_message = if event_name.is_empty() {
-                Some("事件名称不能为空".to_string())
-            } else if let Err(err) = validate_date_format(&event_time) {
-                Some(err.to_string())
-            } else {
-                None
-            };
-
-            if let Some(msg) = error_message {
-                show_error_message(&msg);
-            } else {
-                {
-                    let mut state = ui_state()
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state.error_message = None;
-                }
-
-                tracing::info!(
-                    "添加事件: name={}, time={}, on_index={}, if_staring_day={}",
-                    event_name,
-                    event_time,
-                    on_index,
-                    if_staring_day
-                );
-
-                show_message("正在发送，请稍等···", false);
-
-                let event_name_clone = event_name.clone();
-                let event_time_clone = event_time.clone();
-                let on_index_clone = on_index;
-                let if_staring_day_clone = if_staring_day;
-
-                wit_bindgen::block_on(async move {
-                    if let Some(device_addr) = check_device().await {
-                        if check_app_version(&device_addr).await {
-                            let payload = format!(
-                                r#"{{"type":"addEvent","name":"{}","date":"{}","on_index":{},"IFStaringDay":{}}}"#,
-                                event_name_clone, event_time_clone, on_index_clone, if_staring_day_clone
-                            );
-
-                            if send_to_daymatter(&device_addr, &payload).await {
-                                let root_id: Option<String>;
-                                {
-                                    let mut state = ui_state()
-                                        .write()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                    
-                                    state.all_events.clear();
-                                    state.has_fetched_events = false;
-                                    
-                                    root_id = state.root_element_id.clone();
-                                }
-                                
-                                show_success_message("发送成功！");
-                                
-                                if let Some(root_id) = root_id {
-                                    let ui = build_main_ui();
-                                    psys_host::ui::render(&root_id, ui);
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-        }
-        GET_EVENTS_BUTTON_EVENT => {
-            show_message("正在发送，请稍等···", false);
-
-            wit_bindgen::block_on(async move {
-                if let Some(device_addr) = check_device().await {
-                    if check_app_version(&device_addr).await {
-                        let payload = r#"{"type":"getAllEvent"}"#;
-
-                        if send_to_daymatter(&device_addr, &payload).await {
-                            show_success_message("获取手环端数据成功！");
-                        }
-                    }
-                }
-            });
-        }
-        CHANGE_EVENT_BUTTON_EVENT => {
-            let (event_name, event_time, on_index, if_staring_day, selected_index) = {
-                let state = ui_state()
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                (
-                    state.modify_event_data.name.clone(),
-                    state.modify_event_data.time.clone(),
-                    state.modify_event_data.on_index,
-                    state.modify_event_data.if_staring_day,
-                    state.selected_event_index,
-                )
-            };
-
-            let error_message = if selected_index.is_none() {
-                Some("请选择你要修改的事件！".to_string())
-            } else if event_name.is_empty() {
-                Some("事件名称不能为空".to_string())
-            } else if let Err(err) = validate_date_format(&event_time) {
-                Some(err.to_string())
-            } else {
-                None
-            };
-
-            if let Some(msg) = error_message {
-                show_error_message(&msg);
-            } else {
-                {
-                    let mut state = ui_state()
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state.error_message = None;
-                }
-
-                tracing::info!(
-                    "修改事件: name={}, time={}, on_index={}, if_staring_day={}, index={:?}",
-                    event_name,
-                    event_time,
-                    on_index,
-                    if_staring_day,
-                    selected_index
-                );
-
-                show_message("正在发送，请稍等···", false);
-
-                let event_name_clone = event_name.clone();
-                let event_time_clone = event_time.clone();
-                let on_index_clone = on_index;
-                let if_staring_day_clone = if_staring_day;
-                let index_clone = selected_index.unwrap_or(0);
-
-                wit_bindgen::block_on(async move {
-                    if let Some(device_addr) = check_device().await {
-                        if check_app_version(&device_addr).await {
-                            let payload = format!(
-                                r#"{{"type":"changeEvent","name":"{}","date":"{}","on_index":{},"IFStaringDay":{},"index":{}}}"#,
-                                event_name_clone, event_time_clone, on_index_clone, if_staring_day_clone, index_clone
-                            );
-
-                            if send_to_daymatter(&device_addr, &payload).await {
-                                let root_id: Option<String>;
-                                {
-                                    let mut state = ui_state()
-                                        .write()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                    state.error_message = Some("发送成功！".to_string());
-                                    state.is_success_message = true;
-                                    if let Some(index) = state.selected_event_index {
-                                        if let Some(event) = state.all_events.get_mut(index) {
-                                            event.name = event_name_clone.clone();
-                                            event.time = event_time_clone.clone();
-                                            event.on_index = on_index_clone;
-                                            event.if_staring_day = if_staring_day_clone;
-                                        }
-                                        state.selected_event_name =
-                                            Some(format!("{}　{}", index + 1, event_name_clone));
-                                    }
-                                    root_id = state.root_element_id.clone();
-                                }
-                                if let Some(root_id) = root_id {
-                                    let ui = build_main_ui();
-                                    psys_host::ui::render(&root_id, ui);
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-        }
-        DELETE_EVENT_BUTTON_EVENT => {
-            let selected_index = {
-                let state = ui_state()
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.selected_event_index
-            };
-
-            let error_message = if selected_index.is_none() {
-                Some("请选择你要删除的事件！".to_string())
-            } else {
-                None
-            };
-
-            if let Some(msg) = error_message {
-                show_error_message(&msg);
-            } else {
-                show_message("正在发送，请稍等···", false);
-
-                let index_clone = selected_index.unwrap_or(0);
-
-                wit_bindgen::block_on(async move {
-                    if let Some(device_addr) = check_device().await {
-                        if check_app_version(&device_addr).await {
-                            let payload = format!(
-                                r#"{{"type":"deleteEvent","index":{}}}"#,
-                                index_clone
-                            );
-
-                            if send_to_daymatter(&device_addr, &payload).await {
-                                let root_id: Option<String>;
-                                {
-                                    let mut state = ui_state()
-                                        .write()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                    state.error_message = Some("发送成功！".to_string());
-                                    state.is_success_message = true;
-                                    if let Some(index) = state.selected_event_index {
-                                        state.all_events.remove(index);
-                                        state.selected_event_index = None;
-                                        state.selected_event_name = None;
-                                    }
-                                    root_id = state.root_element_id.clone();
-                                }
-                                if let Some(root_id) = root_id {
-                                    let ui = build_main_ui();
-                                    psys_host::ui::render(&root_id, ui);
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-        }
-        HIDE_ERROR_EVENT => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.error_message = None;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
-        }
-        ADD_BACKGROUND_BUTTON_EVENT => {
-            show_message("正在选择图片，请稍等···", false);
-            
-            wit_bindgen::block_on(async move {
-                let pick_config = dialog::PickConfig {
-                    read: true,
-                    copy_to: None,
+                    dispatch::FETCH_SUCCESS_TEXT.to_string()
                 };
-                let filter_config = dialog::FilterConfig {
-                    multiple: false,
-                    extensions: vec!["png".to_string(), "jpg".to_string(), "jpeg".to_string()],
-                    default_directory: "".to_string(),
-                    default_file_name: "".to_string(),
-                };
-                
-                let pick_result = dialog::pick_file(&pick_config, &filter_config).await;
-                
-                if let Some(device_addr) = check_device().await {
-                    if check_app_version(&device_addr).await {
-                        match compress_image(&pick_result.data) {
-                            Ok(compressed_data) => {
-                                let base64_data = STANDARD.encode(&compressed_data);
-                                let payload = format!(
-                                    r#"{{"type":"addBG","bgBase64":"{}"}}"#,
-                                    base64_data
-                                );
-                                
-                                tracing::info!("发送背景图片: 原始大小={}KB, 压缩后大小={}KB, payload长度={}", 
-                                    pick_result.data.len() / 1024, 
-                                    compressed_data.len() / 1024,
-                                    payload.len());
-                                
-                                if send_to_daymatter(&device_addr, &payload).await {
-                                    show_success_message("背景图片发送成功！");
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("图片压缩失败: {}", e);
-                                show_message("图片处理失败，请重试", false);
-                            }
-                        }
-                    }
-                }
-            });
+                state.status = Some(StatusMessage::success(&text));
+                build::prepare_with(&mut state, true)
+            };
+            build::render_prepared(request);
         }
-        TAB_ADD_EVENT => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.current_tab = EventType::AddEvent;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
+        Err(issue) => {
+            message::set_status_timed(StatusKind::Error, issue.message());
         }
-        TAB_MODIFY_EVENT => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.current_tab = EventType::ModifyEvent;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
-        }
-        TAB_DELETE_EVENT => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.current_tab = EventType::DeleteEvent;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
-        }
-        TAB_ADD_BACKGROUND => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.current_tab = EventType::AddBackground;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
-        }
-        BUTTON_MOUSE_LEAVE => {
-            let root_id: Option<String>;
-            {
-                let mut state = ui_state()
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.hovered_button = None;
-                root_id = state.root_element_id.clone();
-            }
-            if let Some(root_id) = root_id {
-                let ui = build_main_ui();
-                psys_host::ui::render(&root_id, ui);
-            }
-        }
-        _ => {}
     }
 }
 
-fn handle_mouse_enter(event: &str) {
-    let root_id: Option<String>;
-    {
-        let mut state = ui_state()
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.hovered_button = Some(event.to_string());
-        root_id = state.root_element_id.clone();
-    }
-    if let Some(root_id) = root_id {
-        let ui = build_main_ui();
-        psys_host::ui::render(&root_id, ui);
-    }
-}
-
-fn handle_mouse_leave(_event: &str) {
-    let root_id: Option<String>;
-    {
-        let mut state = ui_state()
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.hovered_button = None;
-        root_id = state.root_element_id.clone();
-    }
-    if let Some(root_id) = root_id {
-        let ui = build_main_ui();
-        psys_host::ui::render(&root_id, ui);
-    }
-}
-
-pub fn ui_event_processor(evtype: ui::Event, event: &str, event_payload: &str) {
-    let evtype_str = format!("{:?}", evtype);
-    tracing::info!(
-        "接收到事件: 类型={}, 名称={}, 载荷={}",
-        evtype_str,
-        event,
-        event_payload
-    );
-    match evtype {
-        ui::Event::Click => {
-            handle_button_click(event);
-        }
-        ui::Event::Change => {
-            if event.starts_with("event_") || event.starts_with("modify_") {
-                handle_input_event(event, event_payload);
-            } else {
-                handle_dropdown_event(event, event_payload);
-            }
-        }
-        ui::Event::MouseEnter => {
-            handle_mouse_enter(event);
-        }
-        ui::Event::MouseLeave => {
-            handle_mouse_leave(event);
-        }
-        _ => {}
-    }
-}
-
-fn compress_image(image_data: &[u8]) -> Result<Vec<u8>, String> {
-    let img = ImageReader::new(Cursor::new(image_data))
-        .with_guessed_format()
-        .map_err(|e| format!("无法读取图片: {}", e))?
-        .decode()
-        .map_err(|e| format!("无法解码图片: {}", e))?;
-
-    let (orig_width, orig_height) = img.dimensions();
-    tracing::info!("原始图片尺寸: {}x{}", orig_width, orig_height);
-
-    let (new_width, new_height) = if orig_width > orig_height {
-        if orig_width > 450 {
-            (450, (450 * orig_height) / orig_width)
-        } else {
-            (orig_width, orig_height)
-        }
-    } else {
-        if orig_height > 450 {
-            ((450 * orig_width) / orig_height, 450)
-        } else {
-            (orig_width, orig_height)
-        }
-    };
-
-    tracing::info!("调整后尺寸: {}x{}", new_width, new_height);
-
-    let resized = img.resize(new_width, new_height, FilterType::Lanczos3);
-
-    let mut output = Vec::new();
-    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, 85);
-    resized
-        .write_with_encoder(encoder)
-        .map_err(|e| format!("编码JPEG失败: {}", e))?;
-
-    let output_size_kb = output.len() / 1024;
-    tracing::info!("压缩后大小: {}KB", output_size_kb);
-
-    if output.len() > 100 * 1024 {
-        let mut quality = 80;
-        while quality > 50 && output.len() > 100 * 1024 {
-            output.clear();
-            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, quality);
-            resized
-                .write_with_encoder(encoder)
-                .map_err(|e| format!("编码JPEG失败: {}", e))?;
-            quality -= 5;
-            tracing::info!("调整质量到 {}, 大小: {}KB", quality, output.len() / 1024);
-        }
-
-        if output.len() > 100 * 1024 {
-            return Err(format!("图片压缩后仍超过100KB限制: {}KB", output.len() / 1024));
-        }
-    }
-
-    Ok(output)
+pub async fn handle_timer_event(payload: &str) {
+    message::handle_timer_event(payload).await;
 }

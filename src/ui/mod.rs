@@ -1,11 +1,29 @@
-pub mod state;
-pub mod message;
-pub mod validation;
-pub mod event_handler;
-pub mod build;
-pub mod device;
+//! 插件 UI 分层：纯逻辑层（状态 / 事件表 / 视图模型 / 协议 / 校验）可在 host 上跑测试，
+//! 宿主层（渲染 / 事件处理 / 消息 / 图片）只在 wasm32 编译。
 
+pub mod dispatch;
+pub mod protocol;
+pub mod state;
+pub mod theme;
+pub mod validation;
+pub mod view;
+
+#[cfg(target_arch = "wasm32")]
+mod build;
+#[cfg(target_arch = "wasm32")]
+mod event_handler;
+#[cfg(target_arch = "wasm32")]
+mod image;
+#[cfg(target_arch = "wasm32")]
+mod message;
+#[cfg(target_arch = "wasm32")]
+mod widgets;
+
+#[cfg(target_arch = "wasm32")]
 pub use build::render_main_ui;
-pub use event_handler::ui_event_processor;
-pub use event_handler::handle_interconnect_message;
+#[cfg(target_arch = "wasm32")]
+pub use event_handler::{handle_interconnect_message, handle_timer_event, ui_event_processor};
+#[cfg(target_arch = "wasm32")]
 pub use message::hide_message;
+#[cfg(target_arch = "wasm32")]
+pub use message::sync_today;

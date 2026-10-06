@@ -74,121 +74,161 @@ python scripts/build_dist.py --release --package
 
 ## 使用说明
 
+界面沿用与腕上漫画插件一致的 ClaraLight 规范：顶部药丸分段控制器、18px 大圆角卡片、
+概览页与独立编辑子页、底部单一主操作、常驻状态面板、发送期间锁定重复操作。
+
 ### 添加事件
 
-1. 进入"添加事件"标签页
-2. 填写事件名称
-3. 选择目标日期（默认为当前日期）
-4. 设置是否显示在主页
-5. 设置是否计入起始日
-6. 点击"添加事件"按钮
+1. 顶部切到「添加」
+2. 在「事件信息」卡片填写事件名称、目标日期（默认今天）
+3. 设置「显示在快应用首页」与「计入起始日」（两项影响快应用，**不影响表盘**）
+4. 点击底部「发送到腕端」
 
 ### 修改事件
 
-1. 进入"修改事件"标签页
-2. 点击"获取手环端数据"按钮
-3. 从下拉菜单中选择要修改的事件
-4. 修改事件信息
-5. 点击"修改事件"按钮
+1. 顶部切到「修改」，点击「同步腕端数据」
+2. 在事件列表中点击目标事件卡片，进入编辑子页（左上角圆形按钮返回概览）
+3. 修改名称 / 日期 / 显示选项
+4. 点击「同步修改」，成功后自动回到概览
 
 ### 删除事件
 
-1. 进入"删除事件"标签页
-2. 点击"获取手环端数据"按钮
-3. 从下拉菜单中选择要删除的事件
-4. 点击"删除事件"按钮
+1. 顶部切到「删除」，点击「同步腕端数据」（若尚未获取）
+2. 在事件列表中点击选中事件，脚注会回显「已选「名称 · 目标日」」
+3. 点击「删除所选事件」，在确认框中核对名称与日期后确认
+
+### 状态提示
+
+状态面板常驻在分段控制器上方，分「进行中 / 成功 / 失败」三态，点击可关闭；
+文案只声明「已发送，等待腕端确认」，是否真正落盘以腕端提示为准。
+
+### 背景图片
+
+1. 顶部切到「背景」，点击「选择背景图片」
+2. 选图后自动压缩（最长边 450px、不超过 100KB 的 JPEG）并发送到腕端
+3. 新图未确认前不会替换腕端当前背景
 
 ## 项目结构
 
 ```
 Daymatter-AstroBox-Plugin/
 ├── src/
-│   ├── ui/
-│   │   ├── mod.rs           # UI 模块入口
-│   │   ├── state.rs         # 状态管理
-│   │   ├── message.rs       # 消息处理和通信
-│   │   ├── validation.rs    # 表单验证
-│   │   ├── event_handler.rs # 事件处理
-│   │   ├── build.rs         # UI 构建
-│   │   └── device.rs       # 设备相关功能
-│   ├── lib.rs              # 插件入口
-│   └── logger.rs           # 日志配置
-├── wit/                    # WIT 接口定义
+│   ├── lib.rs              # 插件入口（wasm32 才编译绑定与 guest 实现）
+│   ├── guest.rs            # 宿主导出实现（Level 4 全 async）
+│   ├── logger.rs           # 日志配置
+│   └── ui/
+│       ├── mod.rs          # 模块入口（宿主层按 target 条件编译）
+│       ├── state.rs        # 状态与选择键（纯逻辑）
+│       ├── dispatch.rs     # 事件标识表与动作派发（纯逻辑）
+│       ├── view.rs         # 视图模型与重建指纹（纯逻辑）
+│       ├── theme.rs        # 设计令牌与配色决策（纯逻辑）
+│       ├── protocol.rs     # 两端消息编解码（纯逻辑）
+│       ├── validation.rs   # 表单校验（纯逻辑）
+│       ├── build.rs        # 宿主渲染层
+│       ├── event_handler.rs# 宿主事件入口
+│       ├── message.rs      # 状态条 / 定时器 / 设备通道
+│       └── image.rs        # 背景图片压缩
+├── wit/                    # WIT 接口定义（psys-world-v4）
 ├── scripts/
 │   └── build_dist.py       # 构建脚本
 ├── Cargo.toml             # Rust 项目配置
+├── rust-toolchain.toml    # 工具链固定（1.98.0 + wasm32-wasip2）
 ├── manifest.json           # 插件清单
 └── icon.png               # 插件图标
 ```
 
 ## 开发指南
 
+### 分层原则
+
+纯逻辑层（`state` / `dispatch` / `view` / `theme` / `protocol` / `validation`）不引用任何宿主接口，
+因此可以在开发机上直接跑测试；宿主层（`build` / `event_handler` / `message` / `image`）只在
+`wasm32` 目标下编译，负责把视图模型翻译成元素树、执行宿主调用。
+
+```bash
+# 逻辑层测试（46 项，不需要 AstroBox 宿主）
+cargo test --target x86_64-pc-windows-msvc
+
+# 产物构建
+cargo build --release
+python scripts/build_dist.py --release
+```
+
 ### 状态管理
 
-项目使用 `RwLock` 和 `OnceLock` 实现线程安全的状态管理：
+状态用 `OnceLock<RwLock<UiState>>` 保存，`UiState` 只放纯数据：
 
 ```rust
-static UI_STATE: OnceLock<RwLock<UiState>> = OnceLock::new();
-
-pub fn ui_state() -> &'static RwLock<UiState> {
-    UI_STATE.get_or_init(|| {
-        RwLock::new(UiState { /* ... */ })
-    })
-}
+pub fn read_state() -> RwLockReadGuard<'static, UiState>;
+pub fn write_state() -> RwLockWriteGuard<'static, UiState>;
+pub fn reset_state(today: &str); // 宿主加载时对齐时区，测试时隔离用例
 ```
+
+> **锁纪律（重要）**：`std::sync::RwLock` 不可重入。状态锁内只构造渲染请求，释放 guard 后再调用宿主 `ui::render`；
+> 持锁期间调用 `build::refresh()` 会重复获取写锁，造成死锁。所有发送使用带 token 的单飞状态机，
+> 不用跨宿主 `await` 持有全局业务锁，否则等待设备/API 时会把其他 UI 事件一并堵住。
+
+事件选择使用**稳定键**（`id:<腕端ID>` 或 `idx:<下标>`），不用显示序号定位，
+列表刷新后按键重新校验，键失效即提示重新选择，不会误改同名事件。
 
 ### 事件处理
 
-所有 UI 事件通过 `ui_event_processor` 函数统一处理：
+事件标识由 `dispatch::UiId` 单一表格定义，格式为 `{区域}.{scope}.{角色}`
+（如 `field.modify.on_home.yes`、`action.delete.submit`、`pick.modify.id:e1`）；
+`dispatch::resolve` 把标识与载荷解析成 `Action`，`dispatch::apply_action` 变换状态并
+返回"是否需要重建界面"。测试会双向核对：每个标识都有动作分支，每个被绑定的标识都能反解。
 
 ```rust
-pub fn ui_event_processor(evtype: ui::Event, event: &str, event_payload: &str) {
-    match evtype {
-        ui::Event::Click => handle_button_click(event),
-        ui::Event::Change => handle_input_event(event, event_payload),
-        ui::Event::MouseEnter => handle_mouse_enter(event),
-        ui::Event::MouseLeave => handle_mouse_leave(event),
-        _ => {}
-    }
-}
+let action = dispatch::resolve(event_id, kind, payload);   // 纯函数
+let change = dispatch::apply_action(&mut state, action);   // 纯函数
+if change.rebuild { build::refresh(false); }               // 指纹未变则跳过重画
 ```
+
+### 界面重建
+
+宿主只提供根元素渲染（`ui.render(root_id, element)`），因此优化方式是**避免无谓重建**：
+`view::should_render` 用视图指纹（FNV-1a，覆盖分段 / 状态 / 卡片 / 列表 / 表单 / 主操作）判断，
+指纹未变直接跳过；输入事件只改草稿、不触发重建；按钮不绑定 hover 事件，
+避免每次鼠标移动都重画整棵树。
+
+### UI/UX 规范（ClaraLight，与腕上漫画插件同源）
+
+| 要素 | 规范 |
+| --- | --- |
+| 顶层导航 | `segmented_control` 药丸底座 + 34px 互斥高亮药丸，未选中段才可点 |
+| 页面结构 | 概览页（说明卡 + 列表）+ 独立编辑子页（36×36 圆形返回 + 19px 标题） |
+| 卡片 | 18px 大圆角、`PANEL #1E1E1F` 底、淡描边、`CONTROL` 半透明白底 |
+| 主操作 | 每页恰好一个，次要操作降级为 `AccentQuiet` 并排 |
+| 状态面板 | 三态常驻（进行中 / 成功 / 失败），带图标、点击关闭，不自动消失 |
+| 在途锁定 | `pending_send` 存在时主操作禁用，重复派发静默忽略 |
+| 二元开关 | 「是 / 否」两项始终可点击，选中态只改变强调色，不会禁用当前项或另一项 |
+| 图标 | 内联 Phosphor 风格 SVG（plus / edit / trash / image / calendar / watch / back / chevron） |
+| 窄屏 | `width_full` + `min_width(0)` + `overflow-wrap: anywhere`；列表每页 8 条 + 分页器 |
+
+令牌与纯样式决策集中在 `src/ui/theme.rs`，元素拼装集中在 `src/ui/widgets.rs`，
+结构与文案决策集中在 `src/ui/view.rs`（纯逻辑，可在 host 上测试）。
 
 ### Timer API
 
-使用 Timer API 实现定时功能：
+等待由宿主定时器事件推进（`set_timeout` 只注册定时器并立即返回，没有 async sleep）：
 
 ```rust
-// 设置定时器
-let timer_id = timer::set_timeout(3000, "hide_message").await;
+// 启动快应用后登记延时发送，取代 thread::sleep
+timer::set_timeout(APP_LAUNCH_SETTLE_MS, SEND_TIMER);
 
-// 清除定时器
-timer::clear_timer(timer_id).await;
-
-// 处理定时器事件
-EventType::Timer => {
-    let payload = extract_payload_text(&event_payload);
-    if payload == "hide_message" {
-        hide_message();
-    }
-}
+// 定时器事件里继续推进，失败有界重试
+event::EventType::Timer => ui::handle_timer_event(&event_payload).await,
 ```
 
 ### Interconnect 通信
 
-通过 Interconnect API 与手环应用通信：
-
 ```rust
-// 注册接收器
-register::register_interconnect_recv(device_addr, "com.yzf.daymatter").await;
-
-// 发送消息
-interconnect::send_qaic_message(device_addr, "com.yzf.daymatter", payload).await;
-
-// 处理接收到的消息
-pub fn handle_interconnect_message(payload: &str) {
-    // 解析并处理消息
-}
+register::register_interconnect_recv(device_addr.clone(), PKG_NAME.to_string()).await;
+interconnect::send_qaic_message(device_addr, PKG_NAME.to_string(), payload).await;
 ```
+
+消息体一律用 `serde_json` 构造（`protocol.rs`），名称中的引号 / 反斜杠 / 换行不会破坏消息；
+解析腕端返回时单条异常只跳过该条并计数，不让整批数据失败。
 
 ## 权限
 
@@ -198,12 +238,20 @@ pub fn handle_interconnect_message(payload: &str) {
 - `thirdpartyapp` - 访问第三方应用
 - `device` - 访问设备信息
 - `register_interconnect_recv` - 注册消息接收器
+- `dialog` - 删除确认对话框
 
 ## 版本要求
 
-- **WASI 版本**：2
-- **API 级别**：2
+- **WASI 版本**：3（组件模型，目标仍为 `wasm32-wasip2`）
+- **API 级别**：4（要求支持 API Level 4 的 AstroBox V4 宿主）
 - **手环应用**：倒数日快应用 (版本 >= 21000)
+- **工具链**：Rust 1.98.0（见 `rust-toolchain.toml`）
+
+### 宿主门槛与降级
+
+Level 4 的导出全部是 `async func`，旧宿主（仅支持 Level 2 / 3）无法加载本插件。
+因此发布时保留上一版 `api_level 2` 插件包，直到确认用户宿主已升级；
+快应用侧不感知插件版本，协议字段（`id` / `primaryId` / `revision`）对旧插件均为可选增量。
 
 ## 许可证
 
