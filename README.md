@@ -169,6 +169,10 @@ cargo build --release
 python scripts/build_dist.py --release
 ```
 
+当前 native 测试包含实际跨端编码验证：需要 Node.js 与相邻目录 `../daymatter` 仓库。
+`src/cross_protocol_tests.rs` 调用该仓库的 `tools/protocol-bridge.cjs`，用 Rust 编码请求
+驱动腕端实际页面脚本，再将腕端回包交给 Rust 解码和状态机。宿主 UI 与真实连接仍需设备验证。
+
 ### 状态管理
 
 状态用 `OnceLock<RwLock<UiState>>` 保存，`UiState` 只放纯数据：

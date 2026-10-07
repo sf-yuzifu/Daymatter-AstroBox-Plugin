@@ -14,6 +14,9 @@ wit_bindgen::generate!({
 pub mod logger;
 pub mod ui;
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod cross_protocol_tests;
+
 #[cfg(target_arch = "wasm32")]
 mod guest;
 
