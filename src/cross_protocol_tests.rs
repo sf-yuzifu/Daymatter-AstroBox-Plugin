@@ -124,3 +124,15 @@ fn accumulated_batch_budget_rejects_without_replacing_snapshot() {
     assert!(state.list_request.is_none());
     assert_eq!(state.all_events[0].name, "旧数据");
 }
+
+#[test]
+fn actual_handshake_echo_is_bound_to_operation_and_device() {
+    let (mut state, _) = request(SendPurpose::Fetch);
+    state.start_handshake(1);
+    let output = wrist(json!({"messages":[protocol::handshake("cross-session",1,"watch")]}));
+    let reply = &output["messages"][0];
+    assert_eq!(reply["handshakeId"], "hello-1");
+    assert_eq!(reply["deviceId"], "watch");
+    assert!(state.accept_capabilities(reply));
+    assert!(state.supports("listBatches"));
+}

@@ -51,6 +51,13 @@ pub fn capabilities(session_id: &str) -> String {
         "capabilities":["stableId","mutationResult","requestId","listRequestId","listBatches","themeColor","primaryId","revision","backgroundJpeg"]}).to_string()
 }
 
+pub fn handshake(session_id: &str, token: u64, device_id: &str) -> String {
+    let mut value: Value = serde_json::from_str(&capabilities(session_id)).unwrap();
+    value["handshakeId"] = json!(format!("hello-{token}"));
+    value["deviceId"] = json!(device_id);
+    value.to_string()
+}
+
 pub fn request_status(request_id: &str, session_id: &str) -> String {
     json!({"type":"getRequestResult", "requestId":request_id, "sessionId":session_id}).to_string()
 }

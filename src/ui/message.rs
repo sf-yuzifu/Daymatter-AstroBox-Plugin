@@ -189,7 +189,7 @@ pub async fn drive_pending_send(token: u64) {
             return;
         }
         write_state().start_handshake(token);
-        let hello = protocol::capabilities(&pending.session_id);
+        let hello = protocol::handshake(&pending.session_id, token, &pending.device_id);
         if interconnect::send_qaic_message(pending.device_addr.clone(), PKG_NAME.to_string(), hello).await.is_err() {
             clear_reservation(token);
             set_status_timed(StatusKind::Error, "能力协商发送失败，业务消息未发送");

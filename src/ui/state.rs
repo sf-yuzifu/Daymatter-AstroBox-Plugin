@@ -400,6 +400,11 @@ impl UiState {
         if self.handshake_token != Some(pending.token) || self.handshake_ready
             || value.get("sessionId").and_then(|v| v.as_str()) != Some(pending.session_id.as_str())
             || self.target_device.as_deref() != Some(pending.device_id.as_str()) { return false; }
+        if value.get("handshakeId").and_then(|v| v.as_str()) != Some(format!("hello-{}", pending.token).as_str())
+            || value.get("deviceId").and_then(|v| v.as_str()) != Some(pending.device_id.as_str()) {
+            // 无标记的旧能力回包不提前结束等待；有界超时后走旧协议。
+            return false;
+        }
         self.protocol_v2 = value.get("protocolVersion").and_then(|v| v.as_u64()).unwrap_or(0) >= 2;
         self.capabilities = value.get("capabilities").and_then(|v| v.as_array()).map(|items|
             items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect()).unwrap_or_default();
@@ -786,6 +791,21 @@ mod tests {
     }
 
     #[test]
+    fn 同会话旧握手和错误设备不得提前完成新握手() {
+        let (mut state, token) = waiting_result();
+        state.start_handshake(token);
+        let mut reply = serde_json::json!({"sessionId":"session", "deviceId":"watch",
+            "handshakeId":"hello-old", "protocolVersion":2,"capabilities":["requestId"]});
+        assert!(!state.accept_capabilities(&reply));
+        reply["handshakeId"] = serde_json::json!(format!("hello-{token}"));
+        reply["deviceId"] = serde_json::json!("other");
+        assert!(!state.accept_capabilities(&reply));
+        reply["deviceId"] = serde_json::json!("watch");
+        assert!(state.accept_capabilities(&reply));
+        assert!(state.supports("requestId"));
+    }
+
+    #[test]
     fn 未知结果须完整新快照及显式核实才解锁_迟到回执不串新请求() {
         let (mut state, original) = waiting_result();
         state.finish_send(original);
@@ -1015,6 +1035,7 @@ mod tests {
         assert!(!state.supports("requestId"));
         assert!(state.poll_handshake(token, 8));
         let mut capabilities = serde_json::json!({"sessionId":"stale", "protocolVersion":2,
+            "handshakeId":format!("hello-{token}"), "deviceId":"watch",
             "capabilities":["requestId", "stableId"]});
         assert!(!state.accept_capabilities(&capabilities));
         capabilities["sessionId"] = serde_json::json!("session");
