@@ -62,6 +62,11 @@ fn draft_of(scope: FormScope) -> EventData {
 }
 
 fn validate_draft(draft: &EventData, previous: Option<&str>) -> Option<String> {
+    for (field, allowed) in [("repeat", &["none", "yearly"][..]), ("displayUnit", &["days", "weeks", "months", "years"][..])] {
+        if let Some(value) = draft.extensions.get(field) {
+            if !value.as_str().is_some_and(|text| allowed.contains(&text)) { return Some("重复规则或显示单位无效，请按提示选择".into()); }
+        }
+    }
     if let Err(error) = validate_name(&draft.name, previous) { return Some(error.to_string()); }
     validate_date_format(draft.time.trim()).err().map(|error| error.to_string())
 }

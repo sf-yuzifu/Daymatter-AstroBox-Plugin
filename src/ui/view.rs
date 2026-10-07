@@ -224,6 +224,17 @@ fn form_fields(scope: FormScope, state: &UiState) -> Vec<FieldView> {
             label: FieldRole::CountStartDay.label(),
             hint: FieldRole::CountStartDay.hint(),
         },
+        FieldView::Switch {
+            on_id: UiId::SwitchOn(scope, FieldRole::Repeat),
+            off_id: UiId::SwitchOff(scope, FieldRole::Repeat),
+            on: draft.extensions.get("repeat").and_then(|v| v.as_str()) == Some("yearly"),
+            label: FieldRole::Repeat.label(), hint: FieldRole::Repeat.hint(),
+        },
+        FieldView::Text {
+            id: UiId::Field(scope, FieldRole::Unit),
+            value: draft.extensions.get("displayUnit").and_then(|v| v.as_str()).unwrap_or("days").to_string(),
+            label: FieldRole::Unit.label(), hint: FieldRole::Unit.hint(),
+        },
     ]
 }
 
@@ -237,6 +248,11 @@ fn event_list(scope: FormScope, state: &UiState) -> EventListView {
         .map(|(index, event)| {
             let key = event.selection_key(index);
             let mut badges = vec![event.time.clone()];
+            if event.extensions.get("repeat").and_then(|v| v.as_str()) == Some("yearly") {
+                if let Some((date, Some(years))) = crate::ui::validation::occurrence(&event.time, "yearly", &state.today) {
+                    badges.push(format!("下次 {} · 第{}周年", date, years));
+                }
+            }
             if event.on_index {
                 badges.push("首页".to_string());
             }
@@ -475,7 +491,7 @@ pub fn should_render(state: &mut UiState, force: bool) -> Option<ViewModel> {
 
 /// 预留字段说明文案（F-01 / F-02 / F-03 落地时替换成真实控件）
 pub fn reserved_note() -> String {
-    let names: Vec<&str> = ReservedRole::ALL.iter().map(|role| role.label()).collect();
+    let names: Vec<&str> = ReservedRole::ALL.iter().filter(|role| **role != ReservedRole::Repeat).map(|role| role.label()).collect();
     format!("待支持字段：{}", names.join(" / "))
 }
 
@@ -699,7 +715,7 @@ mod tests {
     fn 添加页字段顺序与说明固定() {
         let state = UiState::new("2026-10-06".to_string());
         let fields = form_fields(FormScope::Add, &state);
-        assert_eq!(fields.len(), 4);
+        assert_eq!(fields.len(), 6);
         assert!(matches!(fields[0], FieldView::Text { .. }));
         assert!(matches!(fields[1], FieldView::Text { .. }));
         assert!(matches!(fields[2], FieldView::Switch { on: true, .. }));

@@ -12,6 +12,8 @@ pub enum FieldRole {
     Date,
     OnHome,
     CountStartDay,
+    Repeat,
+    Unit,
 }
 
 impl FieldRole {
@@ -21,6 +23,8 @@ impl FieldRole {
             FieldRole::Date => "date",
             FieldRole::OnHome => "on_home",
             FieldRole::CountStartDay => "count_start",
+            FieldRole::Repeat => "repeat",
+            FieldRole::Unit => "unit",
         }
     }
 
@@ -30,6 +34,8 @@ impl FieldRole {
             FieldRole::Date => "目标日期",
             FieldRole::OnHome => "显示在快应用首页",
             FieldRole::CountStartDay => "计入起始日",
+            FieldRole::Repeat => "每年重复",
+            FieldRole::Unit => "显示单位",
         }
     }
 
@@ -39,10 +45,14 @@ impl FieldRole {
             FieldRole::Date => "格式 YYYY-MM-DD，需为真实日期",
             FieldRole::OnHome => "只影响快应用首页卡片，与表盘无关",
             FieldRole::CountStartDay => "开启后目标日本身算第 1 天",
+            FieldRole::Repeat => "保留原日期；非闰年2月29日按2月28日发生",
+            FieldRole::Unit => "days / weeks / months / years（天 / 周 / 月 / 年）",
         }
     }
 
-    pub const ALL: [FieldRole; 4] = [
+    pub const ALL: [FieldRole; 6] = [
+        FieldRole::Repeat,
+        FieldRole::Unit,
         FieldRole::Name,
         FieldRole::Date,
         FieldRole::OnHome,
@@ -104,7 +114,15 @@ pub enum UiId {
 }
 
 impl UiId {
-    pub const ALL: [UiId; 33] = [
+    pub const ALL: [UiId; 41] = [
+        UiId::Field(FormScope::Add, FieldRole::Repeat),
+        UiId::Field(FormScope::Modify, FieldRole::Repeat),
+        UiId::Field(FormScope::Add, FieldRole::Unit),
+        UiId::Field(FormScope::Modify, FieldRole::Unit),
+        UiId::SwitchOn(FormScope::Add, FieldRole::Repeat),
+        UiId::SwitchOff(FormScope::Add, FieldRole::Repeat),
+        UiId::SwitchOn(FormScope::Modify, FieldRole::Repeat),
+        UiId::SwitchOff(FormScope::Modify, FieldRole::Repeat),
         UiId::FinishUnknown,
         UiId::Segment(EventType::AddEvent),
         UiId::Segment(EventType::ModifyEvent),
@@ -312,6 +330,7 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
                 match role {
                     FieldRole::Name => draft.name = value,
                     FieldRole::Date => draft.time = value,
+                    FieldRole::Unit => { draft.extensions.insert("displayUnit".into(), serde_json::json!(value)); }
                     _ => {}
                 }
             }
@@ -323,6 +342,7 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
                 match role {
                     FieldRole::OnHome => draft.on_index = on,
                     FieldRole::CountStartDay => draft.if_staring_day = on,
+                    FieldRole::Repeat => { draft.extensions.insert("repeat".into(), serde_json::json!(if on { "yearly" } else { "none" })); }
                     _ => {}
                 }
             }
@@ -576,6 +596,7 @@ mod tests {
     #[test]
     fn 预留字段尚未接入绑定() {
         for role in ReservedRole::ALL {
+            if role == ReservedRole::Repeat { continue; }
             for scope in [FormScope::Add, FormScope::Modify] {
                 let id = format!("field.{}.{}", scope.as_str(), role.as_str());
                 assert!(UiId::parse(&id).is_none(), "{} 尚未实现，不应有绑定", id);

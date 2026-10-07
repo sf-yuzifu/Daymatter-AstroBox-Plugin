@@ -53,6 +53,26 @@ fn events() -> Vec<Value> {
 }
 
 #[test]
+fn recurring_fields_roundtrip_and_old_patch_preserves_preferences() {
+    let mut draft = EventData::draft("生日", "2020-02-29", true, false);
+    draft.extensions.insert("repeat".into(), json!("yearly"));
+    draft.extensions.insert("displayUnit".into(), json!("weeks"));
+    let output = wrist(json!({"messages":[protocol::add_event(&draft),
+        {"type":"changeEvent","index":0,"name":"生日改名"}, protocol::get_all_events()]}));
+    let list = output["messages"].as_array().unwrap().iter().find(|m| m.get("data").is_some()).unwrap();
+    let parsed = protocol::parse_event_list(&list.to_string()).unwrap();
+    let event = &parsed.events[0];
+    assert_eq!(event.time, "2020-02-29");
+    assert_eq!(event.extensions["repeat"], "yearly");
+    assert_eq!(event.extensions["displayUnit"], "weeks");
+    let patch: Value = serde_json::from_str(&protocol::change_event(event, &protocol::EventRef::Id(event.id.clone()))).unwrap();
+    assert_eq!(patch["repeat"], "yearly");
+    assert_eq!(patch["displayUnit"], "weeks");
+    assert_eq!(crate::ui::validation::occurrence(&event.time, "yearly", "2026-02-28"), Some(("2026-02-28".into(), Some(6))));
+    assert_eq!(crate::ui::validation::occurrence(&event.time, "yearly", "2028-02-28"), Some(("2028-02-29".into(), Some(8))));
+}
+
+#[test]
 fn name_rules_match_actual_wrist_for_unicode_and_whitespace() {
     use crate::ui::validation::{validate_name, normalized_name};
     for name in ["😀".repeat(50), "😀".repeat(51), "e\u{0301}".repeat(25),

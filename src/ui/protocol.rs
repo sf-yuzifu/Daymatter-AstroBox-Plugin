@@ -53,7 +53,7 @@ pub fn new_session_id(sequence: u64) -> String {
 
 pub fn capabilities(session_id: &str) -> String {
     json!({"type":"hello", "protocolVersion":PROTOCOL_VERSION, "sessionId":session_id,
-        "capabilities":["stableId","mutationResult","requestId","listRequestId","listBatches","themeColor","primaryId","revision","backgroundJpeg"]}).to_string()
+        "capabilities":["stableId","mutationResult","requestId","listRequestId","listBatches","themeColor","primaryId","revision","backgroundJpeg","yearlyRepeat","displayUnit"]}).to_string()
 }
 
 pub fn handshake(session_id: &str, token: u64, device_id: &str) -> String {
@@ -87,14 +87,21 @@ pub fn set_request_identity_for(payload: &str, request_id: &str, session_id: &st
 }
 
 pub fn add_event(draft: &EventData) -> String {
-    json!({
+    let mut payload = json!({
         "type": "addEvent",
         "name": draft.name,
         "date": draft.time,
         "on_index": draft.on_index,
         "IFStaringDay": draft.if_staring_day,
-    })
-    .to_string()
+    });
+    editable_extensions(&mut payload, draft);
+    payload.to_string()
+}
+
+fn editable_extensions(payload: &mut Value, draft: &EventData) {
+    for field in ["repeat", "displayUnit"] {
+        if let Some(value) = draft.extensions.get(field) { payload[field] = value.clone(); }
+    }
 }
 
 /// 修改消息：优先带稳定 ID，旧版腕端 / 无 ID 事件退回下标（E-11）
@@ -110,6 +117,7 @@ pub fn change_event(draft: &EventData, target: &EventRef) -> String {
         EventRef::Id(id) => payload["id"] = json!(id),
         EventRef::Index(index) => payload["index"] = json!(index),
     }
+    editable_extensions(&mut payload, draft);
     payload.to_string()
 }
 
@@ -224,6 +232,11 @@ fn parse_event(item: &Value, index: usize) -> Option<EventData> {
     if crate::ui::validation::trim_name(&name).is_empty() || name.len() > 4096 || crate::ui::validation::validate_date_format(&time).is_err() { return None; }
     let id = optional_text(object.get("id"), 256)?;
     let theme_color = optional_text(object.get("themeColor"), 16)?;
+    for (field, allowed) in [("repeat", &["none", "yearly"][..]), ("displayUnit", &["days", "weeks", "months", "years"][..])] {
+        if let Some(value) = object.get(field) {
+            if !value.as_str().is_some_and(|text| allowed.contains(&text)) { return None; }
+        }
+    }
     if !theme_color.is_empty() && !["#3184d0", "#f78803", "#e74c3c", "#27ae60", "#9b59b6"].contains(&theme_color.as_str()) { return None; }
     Some(EventData {
         id,

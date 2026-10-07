@@ -224,7 +224,18 @@ pub async fn drive_pending_send(token: u64) {
         set_status_timed(StatusKind::Error, "握手期间目标发生变化，业务消息未发送");
         return;
     }
-    let business: serde_json::Value = serde_json::from_str(&pending.payload).unwrap_or_default();
+    let mut business: serde_json::Value = serde_json::from_str(&pending.payload).unwrap_or_default();
+    for (field, capability, default) in [("repeat", "yearlyRepeat", "none"), ("displayUnit", "displayUnit", "days")] {
+        if business.get(field).is_some() && !read_state().supports(capability) {
+            if business[field].as_str() != Some(default) {
+                clear_reservation(token);
+                set_status_timed(StatusKind::Error, "腕端未确认年度重复/显示单位能力，请更新腕端；业务消息未发送");
+                return;
+            }
+            business.as_object_mut().unwrap().remove(field);
+        }
+    }
+    let business_payload = business.to_string();
     if business.get("index").is_some() && read_state().snapshot_token.is_none() {
         clear_reservation(token);
         set_status_timed(StatusKind::Error, "旧端列表已过期，请重新同步后操作；业务消息未发送");
@@ -241,7 +252,7 @@ pub async fn drive_pending_send(token: u64) {
             && ["requestId", "mutationResult"].iter().all(|required| state.supports(required));
         if enabled {
             state.begin_result_wait(&pending);
-            (protocol::set_request_identity_for(&pending.payload, &pending.request_id, &pending.session_id, &pending.device_id), true)
+            (protocol::set_request_identity_for(&business_payload, &pending.request_id, &pending.session_id, &pending.device_id), true)
         } else if pending.purpose == SendPurpose::Fetch {
             let identified = state.supports("listRequestId");
             state.begin_list_wait(&pending, identified);
@@ -257,7 +268,7 @@ pub async fn drive_pending_send(token: u64) {
             (payload, false)
         } else {
             state.begin_legacy_wait(&pending);
-            (pending.payload.clone(), false)
+            (business_payload, false)
         }
     };
     if pending.purpose == SendPurpose::Fetch {

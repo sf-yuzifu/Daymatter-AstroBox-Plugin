@@ -2,6 +2,20 @@ use std::fmt;
 
 pub const MAX_NAME_LENGTH: usize = 50;
 
+pub fn occurrence(date: &str, repeat: &str, today: &str) -> Option<(String, Option<i32>)> {
+    use chrono::{Datelike, NaiveDate};
+    let original = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    if repeat != "yearly" { return Some((date.to_string(), None)); }
+    let today = NaiveDate::parse_from_str(today, "%Y-%m-%d").ok()?;
+    let mut year = original.year().max(today.year());
+    let make = |year| NaiveDate::from_ymd_opt(year, original.month(), original.day())
+        .or_else(|| NaiveDate::from_ymd_opt(year, 2, 28));
+    let mut target = make(year)?;
+    if target < today { year += 1; target = make(year)?; }
+    if year > 9999 { return None; }
+    Some((target.format("%Y-%m-%d").to_string(), Some(year - original.year())))
+}
+
 pub fn trim_name(name: &str) -> &str {
     name.trim_matches(|c: char| matches!(c, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' |
         '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' |
