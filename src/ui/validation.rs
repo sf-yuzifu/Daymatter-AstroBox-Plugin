@@ -1,5 +1,50 @@
 use std::fmt;
 
+pub const MAX_NAME_LENGTH: usize = 50;
+
+pub fn trim_name(name: &str) -> &str {
+    name.trim_matches(|c: char| matches!(c, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' |
+        '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' |
+        '\u{205f}' | '\u{3000}' | '\u{feff}'))
+}
+
+pub fn validate_name(name: &str, previous: Option<&str>) -> Result<(), &'static str> {
+    if trim_name(name).is_empty() { return Err("事件名称不能为空"); }
+    if previous == Some(name) { return Ok(()); }
+    if trim_name(name).chars().count() > MAX_NAME_LENGTH { return Err("事件名称最多 50 个 Unicode 字符"); }
+    Ok(())
+}
+
+pub fn normalized_name(name: &str, previous: Option<&str>) -> String {
+    if previous == Some(name) { name.to_string() } else { trim_name(name).to_string() }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn 名称码点与空白边界() {
+        for name in ["中".repeat(50), "😀".repeat(50), "e\u{0301}".repeat(25)] {
+            assert!(validate_name(&format!("\u{feff}\u{3000}{}\u{00a0}", name), None).is_ok());
+        }
+        for name in ["中".repeat(51), "😀".repeat(51), "e\u{0301}".repeat(26)] {
+            assert!(validate_name(&name, None).is_err());
+        }
+        assert_eq!(validate_name("\u{feff}\u{3000}\t", None), Err("事件名称不能为空"));
+        assert_eq!(normalized_name(" a  b\u{0085} ", None), "a  b\u{0085}");
+    }
+
+    #[test]
+    fn 旧长名称只允许原样保留() {
+        let old = format!(" {} ", "旧".repeat(60));
+        assert!(validate_name(&old, Some(&old)).is_ok());
+        assert_eq!(normalized_name(&old, Some(&old)), old);
+        assert!(validate_name(&"新".repeat(51), Some(&old)).is_err());
+        assert_eq!(normalized_name(" 新名称 ", Some(&old)), "新名称");
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum DateValidationError {
     Empty,

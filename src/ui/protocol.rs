@@ -221,7 +221,7 @@ fn parse_event(item: &Value, index: usize) -> Option<EventData> {
     let name = object.get("name")?.as_str()?.to_string();
     let time = object.get("date")?.as_str()?.to_string();
     // 保留旧长名称，不静默截断；单字段仍有接收预算。
-    if name.trim().is_empty() || name.len() > 4096 || crate::ui::validation::validate_date_format(&time).is_err() { return None; }
+    if crate::ui::validation::trim_name(&name).is_empty() || name.len() > 4096 || crate::ui::validation::validate_date_format(&time).is_err() { return None; }
     let id = optional_text(object.get("id"), 256)?;
     let theme_color = optional_text(object.get("themeColor"), 16)?;
     if !theme_color.is_empty() && !["#3184d0", "#f78803", "#e74c3c", "#27ae60", "#9b59b6"].contains(&theme_color.as_str()) { return None; }

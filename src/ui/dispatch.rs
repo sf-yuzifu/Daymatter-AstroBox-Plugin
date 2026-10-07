@@ -35,7 +35,7 @@ impl FieldRole {
 
     pub fn hint(self) -> &'static str {
         match self {
-            FieldRole::Name => "最多 50 个字符",
+            FieldRole::Name => "最多 50 个 Unicode 字符，保存时去除首尾空白",
             FieldRole::Date => "格式 YYYY-MM-DD，需为真实日期",
             FieldRole::OnHome => "只影响快应用首页卡片，与表盘无关",
             FieldRole::CountStartDay => "开启后目标日本身算第 1 天",

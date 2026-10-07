@@ -53,6 +53,21 @@ fn events() -> Vec<Value> {
 }
 
 #[test]
+fn name_rules_match_actual_wrist_for_unicode_and_whitespace() {
+    use crate::ui::validation::{validate_name, normalized_name};
+    for name in ["😀".repeat(50), "😀".repeat(51), "e\u{0301}".repeat(25),
+        "e\u{0301}".repeat(26), "\u{feff}\u{3000}\t".into(), " a  b\u{0085} ".into()] {
+        let expected = validate_name(&name, None).is_ok();
+        let draft = EventData::draft(&name, "2026-12-01", true, false);
+        let payload = protocol::set_request_identity_for(&protocol::add_event(&draft), "name-test", "cross-session", "watch");
+        let output = wrist(json!({"messages":[protocol::capabilities("cross-session"), payload]}));
+        let result = output["messages"].as_array().unwrap().iter().find(|m| m["type"] == "mutationResult").unwrap();
+        assert_eq!(result["ok"], expected, "{}", name);
+        if expected { assert_eq!(output["store"]["events"][0]["name"], normalized_name(&name, None)); }
+    }
+}
+
+#[test]
 fn actual_wrist_batches_rust_reverse_duplicate_stale_device_and_drafts() {
     let (mut state, request) = request(SendPurpose::Fetch);
     state.event_data.name = "草稿".into();

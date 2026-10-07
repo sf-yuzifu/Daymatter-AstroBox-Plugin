@@ -8,7 +8,7 @@ use crate::ui::dispatch::{self, Action, UiEventKind};
 use crate::ui::message::{self, SendStartError};
 use crate::ui::protocol::{self, EventRef};
 use crate::ui::state::{read_state, write_state, EventData, FormScope, SendPurpose, StatusKind};
-use crate::ui::validation::validate_date_format;
+use crate::ui::validation::{validate_date_format, validate_name, normalized_name};
 
 fn map_event_kind(event: &ui::Event) -> Option<UiEventKind> {
     match event {
@@ -61,24 +61,19 @@ fn draft_of(scope: FormScope) -> EventData {
     read_state().draft(scope).cloned().unwrap_or_default()
 }
 
-fn validate_draft(draft: &EventData) -> Option<String> {
-    if draft.name.trim().is_empty() {
-        return Some(dispatch::NAME_REQUIRED_TEXT.to_string());
-    }
-    if draft.name.trim().chars().count() > 50 {
-        return Some("事件名称最多 50 个字符".to_string());
-    }
+fn validate_draft(draft: &EventData, previous: Option<&str>) -> Option<String> {
+    if let Err(error) = validate_name(&draft.name, previous) { return Some(error.to_string()); }
     validate_date_format(draft.time.trim()).err().map(|error| error.to_string())
 }
 
 async fn submit_add() {
     let mut draft = draft_of(FormScope::Add);
-    draft.name = draft.name.trim().to_string();
     draft.time = draft.time.trim().to_string();
-    if let Some(error) = validate_draft(&draft) {
+    if let Some(error) = validate_draft(&draft, None) {
         message::set_status_timed(StatusKind::Error, &error);
         return;
     }
+    draft.name = normalized_name(&draft.name, None);
     if message::launch_then_send(protocol::add_event(&draft), SendPurpose::Mutation).await
         == Err(SendStartError::Busy)
     {
@@ -97,12 +92,16 @@ async fn submit_modify() {
         return;
     }
     let mut draft = draft_of(FormScope::Modify);
-    draft.name = draft.name.trim().to_string();
+    let previous = {
+        let state = read_state();
+        state.index_of_key(&key).and_then(|index| state.all_events.get(index)).map(|event| event.name.clone())
+    };
     draft.time = draft.time.trim().to_string();
-    if let Some(error) = validate_draft(&draft) {
+    if let Some(error) = validate_draft(&draft, previous.as_deref()) {
         message::set_status_timed(StatusKind::Error, &error);
         return;
     }
+    draft.name = normalized_name(&draft.name, previous.as_deref());
     let target = event_ref_for(&key);
     match message::launch_then_send(protocol::change_event(&draft, &target), SendPurpose::Mutation).await {
         Ok(_) => {
