@@ -43,7 +43,12 @@ pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 pub const MAX_LIST_EVENTS: usize = 200;
 
 pub fn new_session_id(sequence: u64) -> String {
-    format!("abp-{}-{}", std::process::id(), sequence)
+    // WASI pid 可能恒定，必须包含每次启动的时间身份。
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NONCE: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos()).unwrap_or(0);
+    format!("abp-{}-{}-{}-{}", std::process::id(), nanos, NONCE.fetch_add(1, Ordering::Relaxed), sequence)
 }
 
 pub fn capabilities(session_id: &str) -> String {
@@ -229,6 +234,8 @@ fn parse_event(item: &Value, index: usize) -> Option<EventData> {
         if_staring_day: checked_bool(object.get("IFStaringDay"))?,
         theme_color,
         source_index: Some(index),
+        extensions: object.iter().filter(|(key, _)| !["id", "name", "date", "on_index", "IFStaringDay", "themeColor"].contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone())).collect(),
     })
 }
 
@@ -253,6 +260,14 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+
+    #[test]
+    fn 会话身份同进程同序号也不重复() {
+        let first = new_session_id(1);
+        let second = new_session_id(1);
+        assert_ne!(first, second);
+        assert!(first.len() < 128);
+    }
 
     #[test]
     fn 跳过异常条目仍按原数组下标选择修改删除() {

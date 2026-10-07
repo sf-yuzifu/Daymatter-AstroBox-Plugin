@@ -136,3 +136,18 @@ fn actual_handshake_echo_is_bound_to_operation_and_device() {
     assert!(state.accept_capabilities(reply));
     assert!(state.supports("listBatches"));
 }
+
+#[test]
+fn modify_preserves_wrist_color_extensions_and_list_metadata() {
+    let item = json!({"id":"e1","name":"旧事件","date":"2026-01-01","on_index":false,
+        "IFStaringDay":true,"themeColor":"#e74c3c","futureRule":{"kind":"annual"}});
+    let payload = protocol::change_event(&EventData::draft("改名", "2026-02-01", true, false), &protocol::EventRef::Id("e1".into()));
+    let output = wrist(json!({"events":[item], "messages":[payload,protocol::get_all_events()]}));
+    let event = &output["store"]["events"][0];
+    assert_eq!(event["themeColor"], "#e74c3c");
+    assert_eq!(event["futureRule"]["kind"], "annual");
+    let list = output["messages"].as_array().unwrap().iter().find(|m| m.get("data").is_some()).unwrap();
+    let parsed = protocol::parse_event_list(&list.to_string()).unwrap();
+    assert_eq!(parsed.events[0].extensions["futureRule"]["kind"], "annual");
+    assert_eq!(parsed.events[0].theme_color, "#e74c3c");
+}

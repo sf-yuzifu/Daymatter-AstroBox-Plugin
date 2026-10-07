@@ -24,6 +24,8 @@ pub const HANDSHAKE_MAX_POLLS: u32 = 8;
 pub const LIST_TIMER: &str = "list_result:";
 pub const SNAPSHOT_TIMER: &str = "snapshot_expire:";
 pub const LEGACY_SNAPSHOT_MS: u64 = 60000;
+pub const QUERY_TIMER: &str = "query_result:";
+pub const PREPARE_TIMER: &str = "prepare_timeout:";
 
 /// 状态面板常驻：成功 / 失败不再自动消失，用户可对照腕端核实（P1-51）
 ///
@@ -93,6 +95,7 @@ pub async fn launch_then_send(payload: String, purpose: SendPurpose) -> Result<u
         state.reserve_send(payload, purpose)
     };
     let Some(token) = token else { return Err(SendStartError::Busy) };
+    timer::set_timeout(15000, &format!("{}{}", PREPARE_TIMER, token));
     set_status_timed(StatusKind::Info, "正在连接腕端…");
 
     let Some(device_addr) = find_device().await else {
@@ -115,7 +118,9 @@ pub async fn launch_then_send(payload: String, purpose: SendPurpose) -> Result<u
         clear_reservation(token);
         return Err(SendStartError::Unavailable);
     };
+    if !read_state().active_send(token) { return Err(SendStartError::Unavailable); }
     let still_connected = device::get_connected_device_list().await.iter().any(|device| device.addr == device_addr);
+    if !read_state().active_send(token) { return Err(SendStartError::Unavailable); }
     if !still_connected || thirdpartyapp::launch_qa(device_addr.clone(), app, "/index".to_string()).await.is_err() {
         clear_reservation(token);
         set_status_timed(StatusKind::Error, "启动腕端应用失败");
@@ -126,6 +131,7 @@ pub async fn launch_then_send(payload: String, purpose: SendPurpose) -> Result<u
         state.attach_send_device(token, device_addr)
     };
     if !reserved {
+        clear_reservation(token);
         return Err(SendStartError::Busy);
     }
     timer::set_timeout(APP_LAUNCH_SETTLE_MS, &format!("{}{}", SEND_TIMER, token));
@@ -176,6 +182,7 @@ pub async fn drive_pending_send(token: u64) {
     };
     let Some(pending) = pending else { return };
     let current_devices = device::get_connected_device_list().await;
+    if !read_state().active_send(token) { return; }
     if !current_devices.iter().any(|device| device.addr == pending.device_addr) {
         clear_reservation(token);
         set_status_timed(StatusKind::Error, "目标设备已断开，业务消息未发送，请重新连接后同步");
@@ -188,6 +195,7 @@ pub async fn drive_pending_send(token: u64) {
             set_status_timed(StatusKind::Error, "腕端消息接收器注册失败，业务消息未发送");
             return;
         }
+        if read_state().pending_send.as_ref().map(|request| request.token) != Some(token) { return; }
         write_state().start_handshake(token);
         let hello = protocol::handshake(&pending.session_id, token, &pending.device_id);
         if interconnect::send_qaic_message(pending.device_addr.clone(), PKG_NAME.to_string(), hello).await.is_err() {
@@ -195,6 +203,7 @@ pub async fn drive_pending_send(token: u64) {
             set_status_timed(StatusKind::Error, "能力协商发送失败，业务消息未发送");
             return;
         }
+        if !read_state().active_send(token) { return; }
     }
     let waiting = write_state().poll_handshake(token, HANDSHAKE_MAX_POLLS);
     if waiting {
@@ -240,12 +249,16 @@ pub async fn drive_pending_send(token: u64) {
                 protocol::set_request_identity_for(&pending.payload, &pending.request_id, &pending.session_id, &pending.device_id)
             } else { pending.payload.clone() };
             if identified && state.supports("listBatches") {
+                state.list_request.as_mut().unwrap().batched = true;
                 let mut value: serde_json::Value = serde_json::from_str(&payload).unwrap();
                 value["listBatches"] = serde_json::json!(true);
                 payload = value.to_string();
             }
             (payload, false)
-        } else { (pending.payload.clone(), false) }
+        } else {
+            state.begin_legacy_wait(&pending);
+            (pending.payload.clone(), false)
+        }
     };
     if pending.purpose == SendPurpose::Fetch {
         timer::set_timeout(RESULT_TIMEOUT_MS, &format!("{}{}", LIST_TIMER, token));
@@ -260,7 +273,7 @@ pub async fn drive_pending_send(token: u64) {
         };
         let purpose = completed.purpose;
         if purpose != SendPurpose::Fetch {
-            if !result_protocol { state.require_confirmation(completed.base_revision); }
+            if !result_protocol && state.legacy_request.is_none() { state.require_confirmation(completed.base_revision); }
         }
         drop(state);
         if purpose == SendPurpose::Fetch {
@@ -297,7 +310,7 @@ async fn fail_attempt(token: u64, pending: PendingSend, message: &str) {
             return;
         };
         if finished.purpose != SendPurpose::Fetch {
-            if state.result_request.is_none() { state.require_confirmation(finished.base_revision); }
+            if state.result_request.is_none() && state.legacy_request.is_none() { state.require_confirmation(finished.base_revision); }
         }
     }
     let final_message = if pending.purpose == SendPurpose::Fetch {
@@ -313,8 +326,9 @@ async fn fail_attempt(token: u64, pending: PendingSend, message: &str) {
 
 /// 用户刷新时也核实原请求，不重发 mutation。
 pub async fn query_original_result() {
-    let original = read_state().result_request.clone();
-    let Some(original) = original else { return; };
+    let query = write_state().begin_result_query();
+    let Some((sequence, original)) = query else { return; };
+    timer::set_timeout(RESULT_TIMEOUT_MS, &format!("{}{}", QUERY_TIMER, sequence));
     let devices = device::get_connected_device_list().await;
     if !devices.iter().any(|device| device.addr == original.device_id) { return; }
     let request = protocol::request_status_for(&original.request_id, &original.session_id, &original.device_id);
@@ -346,8 +360,29 @@ pub async fn confirm_delete(event: &crate::ui::state::EventData) -> bool {
 /// 宿主定时器事件分派
 pub async fn handle_timer_event(payload: &str) {
     let payload = unwrap_timer_payload(payload);
+    if let Some(token) = payload.strip_prefix(PREPARE_TIMER).and_then(|value| value.parse::<u64>().ok()) {
+        let render = {
+            let mut state = write_state();
+            if state.expire_preparation(token) { build::prepare_with(&mut state, false) } else { None }
+        };
+        build::render_prepared(render);
+        return;
+    }
+    if let Some(sequence) = payload.strip_prefix(QUERY_TIMER).and_then(|value| value.parse::<u64>().ok()) {
+        let render = {
+            let mut state = write_state();
+            if state.expire_result_query(sequence) { build::prepare_with(&mut state, false) } else { None }
+        };
+        build::render_prepared(render);
+        return;
+    }
     if let Some(token) = payload.strip_prefix(SNAPSHOT_TIMER).and_then(|value| value.parse::<u64>().ok()) {
-        write_state().expire_snapshot(token);
+        let render = {
+            let mut state = write_state();
+            state.expire_snapshot(token);
+            build::prepare_with(&mut state, false)
+        };
+        build::render_prepared(render);
         return;
     }
     if let Some(token) = payload.strip_prefix(LIST_TIMER).and_then(|value| value.parse::<u64>().ok()) {
@@ -385,7 +420,9 @@ pub async fn handle_timer_event(payload: &str) {
                 build::prepare_with(&mut state, false)
             };
             build::render_prepared(render);
-            let _ = interconnect::send_qaic_message(device_addr, PKG_NAME.to_string(), request).await;
+            // 与手动核实共用查询代际和有界超时；原身份保持不变。
+            let _ = (device_addr, request);
+            query_original_result().await;
         }
     }
 }

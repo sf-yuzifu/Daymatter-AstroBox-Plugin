@@ -69,6 +69,8 @@ pub struct EventData {
     pub if_staring_day: bool,
     pub theme_color: String,
     pub source_index: Option<usize>,
+    /// 保留接收模型的未知字段；编辑命令不回传它们，避免覆盖腕端更新。
+    pub extensions: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl EventData {
@@ -81,6 +83,7 @@ impl EventData {
             if_staring_day,
             theme_color: String::new(),
             source_index: None,
+            extensions: Default::default(),
         }
     }
 
@@ -159,12 +162,14 @@ pub enum SendPurpose {
 pub struct ListRequest {
     pub pending: PendingSend,
     pub identified: bool,
+    pub batched: bool,
 }
 
 pub struct ListAssembly {
     pub metadata: serde_json::Value,
     pub batches: Vec<Option<serde_json::Value>>,
     pub bytes: usize,
+    pub items: usize,
 }
 
 /// 子页路由：概览 → 独立编辑子页 → 返回概览（对齐漫画「概览卡片 + 独立编辑子页」）
@@ -220,6 +225,10 @@ pub struct UiState {
     pub list_assembly: Option<ListAssembly>,
     pub result_unknown: bool,
     pub recovery_snapshot: Option<u64>,
+    pub query_sequence: u64,
+    pub query_deadline: Option<u64>,
+    pub result_status: Option<StatusMessage>,
+    pub legacy_request: Option<PendingSend>,
 }
 
 impl UiState {
@@ -261,6 +270,10 @@ impl UiState {
             list_assembly: None,
             result_unknown: false,
             recovery_snapshot: None,
+            query_sequence: 0,
+            query_deadline: None,
+            result_status: None,
+            legacy_request: None,
         }
     }
 
@@ -338,6 +351,7 @@ impl UiState {
             return None;
         }
         self.send_sequence = self.send_sequence.wrapping_add(1);
+        if purpose != SendPurpose::Fetch { self.result_status = None; }
         if purpose == SendPurpose::Fetch { self.list_request = None; self.list_assembly = None; }
         let token = self.send_sequence;
         self.pending_send = Some(PendingSend {
@@ -359,6 +373,10 @@ impl UiState {
         let Some(pending) = self.pending_send.as_ref().filter(|pending| pending.token == token) else {
             return false;
         };
+        if self.result_request.as_ref().is_some_and(|original| original.device_id != device_addr) {
+            return false;
+        }
+        if self.legacy_request.as_ref().is_some_and(|original| original.device_id != device_addr) { return false; }
         if (!pending.device_addr.is_empty() || pending.purpose != SendPurpose::Fetch)
             && !pending.device_id.is_empty() && pending.device_id != device_addr { return false; }
         let payload: serde_json::Value = serde_json::from_str(&pending.payload).unwrap_or_default();
@@ -385,6 +403,10 @@ impl UiState {
         pending.session_id = self.session_id.clone();
         pending.in_progress = false;
         true
+    }
+
+    pub fn active_send(&self, token: u64) -> bool {
+        self.pending_send.as_ref().is_some_and(|pending| pending.token == token)
     }
 
     pub fn start_handshake(&mut self, token: u64) {
@@ -467,7 +489,7 @@ impl UiState {
             // the fetch token here so its later timer completion is harmless.
             self.pending_send = None;
         }
-        if self.awaiting_confirmation && self.result_request.is_none() {
+        if self.awaiting_confirmation && self.result_request.is_none() && self.legacy_request.is_none() {
             let fresh_enough = match (revision, self.awaiting_revision) {
                 (Some(current), Some(base)) => current >= base,
                 // Old app versions don't send revision; retain compatibility.
@@ -492,6 +514,9 @@ impl UiState {
 
     /// 必须在发送宿主 await 前预约，回执可能早于传输回调。
     pub fn begin_result_wait(&mut self, pending: &PendingSend) {
+        self.legacy_request = None;
+        self.query_deadline = None;
+        self.result_status = None;
         self.result_unknown = false;
         self.recovery_snapshot = None;
         self.result_request = Some(pending.clone());
@@ -500,11 +525,29 @@ impl UiState {
         self.awaiting_revision = pending.base_revision;
     }
 
+    pub fn begin_legacy_wait(&mut self, pending: &PendingSend) {
+        self.legacy_request = Some(pending.clone());
+        self.result_unknown = true;
+        self.recovery_snapshot = None;
+        self.awaiting_confirmation = true;
+        self.awaiting_revision = pending.base_revision;
+        self.result_status = Some(StatusMessage::info("旧协议无法确认保存，请同步完整列表并核实；不要直接重复新增"));
+    }
+
+    pub fn expire_preparation(&mut self, token: u64) -> bool {
+        if self.result_request.as_ref().is_some_and(|request| request.token == token)
+            || self.legacy_request.as_ref().is_some_and(|request| request.token == token)
+            || self.list_request.as_ref().is_some_and(|request| request.pending.token == token) { return false; }
+        if self.finish_send(token).is_none() { return false; }
+        self.status = Some(StatusMessage::error("启动或能力协商超时，业务消息未发送，可重新操作"));
+        true
+    }
+
     pub fn begin_list_wait(&mut self, pending: &PendingSend, identified: bool) {
         if self.list_request.as_ref().is_none_or(|request| request.pending.token != pending.token) {
             self.list_assembly = None;
         }
-        self.list_request = Some(ListRequest { pending: pending.clone(), identified });
+        self.list_request = Some(ListRequest { pending: pending.clone(), identified, batched: false });
     }
 
     pub fn expire_list(&mut self, token: u64) -> bool {
@@ -534,12 +577,15 @@ impl UiState {
         if matches!((parsed.revision, minimum), (Some(current), Some(base)) if current < base) { return false; }
         let skipped = parsed.skipped;
         self.snapshot_token = Some(pending.token);
-        if self.result_unknown && self.result_request.as_ref().is_some_and(|original|
+        self.recovery_snapshot = None;
+        if skipped == 0 && self.result_unknown && self.result_request.as_ref().or(self.legacy_request.as_ref()).is_some_and(|original|
             original.device_id == pending.device_id && pending.token > original.token) {
             self.recovery_snapshot = Some(pending.token);
         }
         self.list_request = None;
         self.list_assembly = None;
+        let selected_before = self.selected_event_key.as_deref().and_then(|key|
+            self.index_of_key(key).and_then(|index| self.all_events.get(index))).cloned();
         self.all_events = parsed.events;
         self.has_fetched_events = true;
         self.apply_confirmed_list(parsed.primary_id, parsed.revision);
@@ -548,6 +594,14 @@ impl UiState {
             // 选择失效，但保留用户未提交的表单，不自动装载其他事件。
             self.selected_event_key = None;
             self.pending_delete_key = None;
+        }
+        if let Some(previous) = selected_before.filter(|event| event.id.is_empty()) {
+            let same = self.selected_event_key.as_deref().and_then(|key| self.index_of_key(key))
+                .and_then(|index| self.all_events.get(index)).is_some_and(|current|
+                    current.name == previous.name && current.time == previous.time
+                    && current.on_index == previous.on_index && current.if_staring_day == previous.if_staring_day
+                    && current.theme_color == previous.theme_color);
+            if !same { self.selected_event_key = None; self.pending_delete_key = None; }
         }
         self.status = Some(if self.result_request.is_some() {
             StatusMessage::info("列表已刷新，原请求结果仍待核实；不要重复新增")
@@ -563,7 +617,7 @@ impl UiState {
     pub fn can_finish_unknown(&self) -> bool {
         self.result_unknown && !self.sending() && self.list_request.is_none()
             && self.recovery_snapshot.is_some() && self.recovery_snapshot == self.snapshot_token
-            && self.result_request.as_ref().is_some_and(|original|
+            && self.result_request.as_ref().or(self.legacy_request.as_ref()).is_some_and(|original|
                 self.target_device.as_deref() == Some(original.device_id.as_str())
                 && self.snapshot_device.as_deref() == Some(original.device_id.as_str()))
     }
@@ -571,12 +625,33 @@ impl UiState {
     pub fn finish_unknown_after_review(&mut self) -> bool {
         if !self.can_finish_unknown() { return false; }
         self.result_request = None;
+        self.legacy_request = None;
         self.result_deadline = None;
         self.result_unknown = false;
         self.recovery_snapshot = None;
+        self.query_deadline = None;
+        self.result_status = None;
         self.awaiting_confirmation = false;
         self.awaiting_revision = None;
         self.status = Some(StatusMessage::info("已结束原请求等待，未重发操作；草稿已保留，请按核实结果决定下一步"));
+        true
+    }
+
+    pub fn begin_result_query(&mut self) -> Option<(u64, PendingSend)> {
+        let original = self.result_request.as_ref()?;
+        if self.target_device.as_deref() != Some(original.device_id.as_str()) { return None; }
+        let original = original.clone();
+        self.query_sequence = self.query_sequence.wrapping_add(1);
+        self.query_deadline = Some(self.query_sequence);
+        Some((self.query_sequence, original))
+    }
+
+    pub fn expire_result_query(&mut self, sequence: u64) -> bool {
+        if self.query_deadline != Some(sequence) || self.result_request.is_none() { return false; }
+        self.query_deadline = None;
+        self.result_unknown = true;
+        self.recovery_snapshot = None;
+        self.result_status = Some(StatusMessage::info("原结果查询无响应；请重新同步同设备完整列表并核实，不能直接重复新增"));
         true
     }
 
@@ -609,7 +684,7 @@ impl UiState {
         metadata.as_object_mut().unwrap().remove("data");
         metadata.as_object_mut().unwrap().remove("batchIndex");
         if self.list_assembly.is_none() {
-            self.list_assembly = Some(ListAssembly { metadata: metadata.clone(), batches: vec![None; count], bytes: 0 });
+            self.list_assembly = Some(ListAssembly { metadata: metadata.clone(), batches: vec![None; count], bytes: 0, items: 0 });
         }
         let assembly = self.list_assembly.as_mut().unwrap();
         if assembly.metadata != metadata { return fail(self); }
@@ -618,7 +693,8 @@ impl UiState {
             return false;
         }
         assembly.bytes += size;
-        if assembly.bytes > crate::ui::protocol::MAX_MESSAGE_BYTES { return fail(self); }
+        assembly.items += data.unwrap().len();
+        if assembly.bytes > crate::ui::protocol::MAX_MESSAGE_BYTES || assembly.items > total || assembly.items > 200 { return fail(self); }
         assembly.batches[index] = Some(value["data"].clone());
         if assembly.batches.iter().any(Option::is_none) { return false; }
         let mut items = Vec::new();
@@ -643,6 +719,8 @@ impl UiState {
         { return false; }
         let kind = value.get("type").and_then(|v| v.as_str());
         if kind == Some("requestStatus") {
+            if !matches!(value.get("status").and_then(|v| v.as_str()), Some("processing" | "unknown" | "expired")) { return false; }
+            self.query_deadline = None;
             let unknown = matches!(value.get("status").and_then(|v| v.as_str()), Some("unknown" | "expired"));
             if !unknown || !self.result_unknown { self.recovery_snapshot = None; }
             self.result_unknown = unknown;
@@ -650,6 +728,7 @@ impl UiState {
                 Some("processing") => "腕端仍在保存，请等待原请求结果",
                 _ => "原请求结果未知，请核实腕端数据；不要重复新增",
             }));
+            self.result_status = self.status.clone();
             return true;
         }
         if kind != Some("mutationResult") { return false; }
@@ -662,6 +741,7 @@ impl UiState {
         let code = value.get("code").and_then(|v| v.as_str()).unwrap_or("");
         if !ok && code == "REQUEST_CONFLICT" {
             self.status = Some(StatusMessage::error("请求身份冲突，原请求可能仍在保存；请查询原结果，不要重复新增"));
+            self.result_status = self.status.clone();
             return true;
         }
         let partial = value.get("primary").and_then(|v| v.get("ok")).and_then(|v| v.as_bool()) == Some(false)
@@ -669,6 +749,7 @@ impl UiState {
             || code == "WATCHFACE_FAIL";
         self.finish_send(token);
         self.result_request = None;
+        self.query_deadline = None;
         self.result_unknown = false;
         self.recovery_snapshot = None;
         self.result_deadline = None;
@@ -688,6 +769,7 @@ impl UiState {
                 self.capabilities.clear();
             }
         }
+        self.result_status = self.status.clone();
         true
     }
 
@@ -791,6 +873,82 @@ mod tests {
     }
 
     #[test]
+    fn 旧协议写操作须显式核实_刷新不自动解锁且草稿保留() {
+        let (mut state, token) = waiting_result();
+        let original = state.result_request.take().unwrap();
+        state.begin_legacy_wait(&original);
+        state.finish_send(token);
+        state.event_data.name = "草稿".into();
+        let fetch = state.reserve_send("{}".into(), SendPurpose::Fetch).unwrap();
+        state.attach_send_device(fetch, "watch".into());
+        let pending = state.claim_send(fetch).unwrap();
+        state.begin_list_wait(&pending, false);
+        assert!(state.accept_event_list(crate::ui::protocol::parse_event_list(r#"{"data":[]}"#).unwrap()));
+        assert!(state.awaiting_confirmation);
+        assert!(state.can_finish_unknown());
+        assert!(state.finish_unknown_after_review());
+        assert!(state.legacy_request.is_none());
+        assert_eq!(state.event_data.name, "草稿");
+    }
+
+    #[test]
+    fn 准备超时释放预约但不会清掉已发出的未知结果() {
+        let mut state = UiState::new("2026-10-07".into());
+        let token = state.reserve_send("{}".into(), SendPurpose::Mutation).unwrap();
+        assert!(state.expire_preparation(token));
+        assert!(!state.busy());
+        assert!(!state.attach_send_device(token, "watch".into()));
+        let (mut state, token) = waiting_result();
+        assert!(!state.expire_preparation(token));
+        assert!(state.busy());
+    }
+
+    #[test]
+    fn 含无效跳过项的快照不能用来解除未知提交锁() {
+        let (mut state, token) = waiting_result();
+        state.finish_send(token);
+        state.result_unknown = true;
+        let fetch = state.reserve_send("{}".into(), SendPurpose::Fetch).unwrap();
+        state.attach_send_device(fetch, "watch".into());
+        let pending = state.claim_send(fetch).unwrap();
+        state.begin_list_wait(&pending, true);
+        let mut parsed = list_message(fetch, 11);
+        parsed.skipped = 1;
+        assert!(state.accept_event_list(parsed));
+        assert!(!state.can_finish_unknown());
+        assert!(state.awaiting_confirmation);
+    }
+
+    #[test]
+    fn 查询无响应转待核实_旧查询timer不影响新查询或已结算结果() {
+        let (mut state, token) = waiting_result();
+        state.finish_send(token);
+        let (old, _) = state.begin_result_query().unwrap();
+        let (current, _) = state.begin_result_query().unwrap();
+        assert!(!state.expire_result_query(old));
+        assert!(state.expire_result_query(current));
+        assert!(state.result_unknown);
+        assert!(state.awaiting_confirmation);
+        assert!(!state.can_finish_unknown());
+        let (query, _) = state.begin_result_query().unwrap();
+        assert!(state.apply_request_message(&result_message(token, true)));
+        assert!(!state.expire_result_query(query));
+        state.status = Some(StatusMessage::info("正在刷新"));
+        assert_eq!(crate::ui::view::build(&state).status.unwrap().text, "腕端已保存");
+    }
+
+    #[test]
+    fn 原请求未结算不能换设备核实_回到原设备仍可刷新() {
+        let (mut state, token) = waiting_result();
+        state.finish_send(token);
+        let fetch = state.reserve_send("{}".into(), SendPurpose::Fetch).unwrap();
+        assert!(!state.attach_send_device(fetch, "other".into()));
+        assert_eq!(state.target_device.as_deref(), Some("watch"));
+        assert!(state.result_request.is_some());
+        assert!(state.attach_send_device(fetch, "watch".into()));
+    }
+
+    #[test]
     fn 同会话旧握手和错误设备不得提前完成新握手() {
         let (mut state, token) = waiting_result();
         state.start_handshake(token);
@@ -868,6 +1026,19 @@ mod tests {
         let pending = state.claim_send(token).unwrap();
         state.begin_list_wait(&pending, identified);
         (state, token)
+    }
+
+    #[test]
+    fn 旧下标刷新身份变化撤销选择但保留修改草稿() {
+        let (mut state, token) = waiting_list(false);
+        state.all_events = vec![EventData::draft("旧事件", "2026-01-01", false, false)];
+        state.select_event("idx:0");
+        state.modify_event_data.name = "未提交".into();
+        let parsed = crate::ui::protocol::parse_event_list(r#"{"data":[{"name":"另一个事件","date":"2026-01-01"}]}"#).unwrap();
+        assert!(state.accept_event_list(parsed));
+        assert!(state.selected_event_key.is_none());
+        assert_eq!(state.modify_event_data.name, "未提交");
+        assert_eq!(state.snapshot_token, Some(token));
     }
 
     fn batch_message(token: u64, index: usize, name: &str) -> serde_json::Value {

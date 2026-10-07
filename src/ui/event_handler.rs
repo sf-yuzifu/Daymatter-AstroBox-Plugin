@@ -244,6 +244,8 @@ pub async fn handle_interconnect_message(payload: &str) {
             let mut accepted_token = None;
             let request = {
                 let mut state = write_state();
+                // 已请求分批时，不允许同身份整包绕过齐全校验。
+                if state.list_request.as_ref().is_some_and(|request| request.batched) { return; }
                 if state.accept_event_list(parsed) {
                     accepted_token = state.snapshot_token;
                     build::prepare_with(&mut state, true)
@@ -255,9 +257,8 @@ pub async fn handle_interconnect_message(payload: &str) {
             build::render_prepared(request);
         }
         Err(issue) => {
-            if read_state().list_request.is_some() {
-                message::set_status_timed(StatusKind::Error, issue.message());
-            }
+            // 无可信来源的畸形回包不结算请求，统一由有界列表超时收尾。
+            tracing::debug!("ignored malformed list: {}", issue.message());
         }
     }
 }

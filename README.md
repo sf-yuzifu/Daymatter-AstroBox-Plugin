@@ -105,7 +105,8 @@ python scripts/build_dist.py --release --package
 超时查询原请求后仍接收迟到回执；刷新列表不会解锁尚未确认的新协议写操作。
 原结果未知/过期时保留待核实状态；先查询并同步同设备完整列表，核对后点击
 “已核实，结束等待”显式恢复。该操作不声明腕端确认成功，不重发增删改，并保留草稿。
-核实快照 60 秒后过期；仍在 processing 或查询没有结果时不能直接解除等待。
+核实快照 60 秒后过期；仍在 processing 时不能直接解除等待。原结果查询 8 秒无响应后，
+须再次同步同设备完整列表，再显式核实结束等待；不会自动重发。原请求未结算时拒绝换设备核实。
 
 每次业务发送先等待能力握手（最多约 2 秒），超时使用旧业务模式；只有同时确认
 requestId 与 mutationResult 才启用保存结果协议。带稳定 ID 的修改/删除还要求 stableId 能力。
@@ -273,7 +274,7 @@ interconnect::send_qaic_message(device_addr, PKG_NAME.to_string(), payload).awai
 ### 宿主门槛与降级
 
 Level 4 的导出全部是 `async func`，旧宿主（仅支持 Level 2 / 3）无法加载本插件。
-因此发布时保留上一版 `api_level 2` 插件包，直到确认用户宿主已升级；
+因此发布计划要求保留上一版 `api_level 2` 插件包，直到确认用户宿主已升级；当前仓库仅找到 Level4 ABP，真实回退产物仍待取得与校验；
 快应用侧不感知插件版本，协议字段（`id` / `primaryId` / `revision`）对旧插件均为可选增量。
 
 本仓库没有 AstroBox V4 的具体最低语义化版本号，不能据 API Level 推测版本号；安装前应以宿主插件管理器报告的 API Level 4 能力为准。发布策略是保留上一版 Level 2 ABP 作为独立回退包，新版只发布给 Level 4 宿主；Level 4 插件启动后与腕端协商 `protocolVersion: 2` 和逐项 capabilities，未收到能力确认时保持旧业务 JSON，不发送新协议字段。快应用版本门槛为 `versionCode >= 21000`。

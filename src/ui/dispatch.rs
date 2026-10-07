@@ -352,6 +352,7 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
                 rebuild = false;
             }
             state.status = None;
+            state.result_status = None;
         }
         Action::FetchEvents => {
             status = Some(StatusMessage::info(SUBMITTING_TEXT));

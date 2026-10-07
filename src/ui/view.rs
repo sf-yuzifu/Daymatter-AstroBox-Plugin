@@ -236,11 +236,11 @@ fn event_list(scope: FormScope, state: &UiState) -> EventListView {
         .into_iter()
         .map(|(index, event)| {
             let key = event.selection_key(index);
-            let mut badges = Vec::new();
+            let mut badges = vec![event.time.clone()];
             if event.on_index {
                 badges.push("首页".to_string());
             }
-            if state.primary_id.as_deref() == Some(event.id.as_str()) {
+            if !event.id.is_empty() && state.primary_id.as_deref() == Some(event.id.as_str()) {
                 badges.push("表盘".to_string());
             }
             if event.if_staring_day {
@@ -320,7 +320,7 @@ fn segments(state: &UiState) -> Vec<SegmentView> {
 }
 
 pub fn build(state: &UiState) -> ViewModel {
-    let status = state.status.as_ref().map(|message| StatusView {
+    let status = state.result_status.as_ref().or(state.status.as_ref()).map(|message| StatusView {
         kind: message.kind,
         text: message.text.clone(),
         dismiss_id: UiId::StatusDismiss,
@@ -435,7 +435,7 @@ pub fn build(state: &UiState) -> ViewModel {
             });
         }
     }
-    if state.result_request.is_some() {
+    if state.result_request.is_some() || state.legacy_request.is_some() {
         model.cards.push(CardBlock::Note {
             title: "原请求结果核实",
             description: "结果未知时先同步完整列表并核对事件。确认后可结束等待；这不代表腕端确认成功，也不会重发操作。".to_string(),
@@ -562,7 +562,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].id, "pick.modify.id:e1");
         assert_eq!(rows[0].label, "同名");
-        assert_eq!(rows[0].detail, "首页");
+        assert_eq!(rows[0].detail, "2026-01-01 · 首页");
         assert!(rows[0].navigates);
         let action = crate::ui::dispatch::resolve(&rows[0].id, UiEventKind::Click, "").expect("行可点击");
         assert_eq!(action, Action::PickEvent { scope: FormScope::Modify, key: "id:e1".into() });
@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(view.route, Route::Overview);
         assert!(view.primary.as_ref().unwrap().enabled);
         assert!(view.list.as_ref().unwrap().footnote.contains("已选「同名 · 2026-02-02」"));
-        assert_eq!(view.list.as_ref().unwrap().rows[1].detail, "含首日");
+        assert_eq!(view.list.as_ref().unwrap().rows[1].detail, "2026-02-02 · 含首日");
     }
 
     #[test]
