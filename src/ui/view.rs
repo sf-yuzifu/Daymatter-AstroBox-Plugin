@@ -435,6 +435,20 @@ pub fn build(state: &UiState) -> ViewModel {
             });
         }
     }
+    if state.result_request.is_some() {
+        model.cards.push(CardBlock::Note {
+            title: "原请求结果核实",
+            description: "结果未知时先同步完整列表并核对事件。确认后可结束等待；这不代表腕端确认成功，也不会重发操作。".to_string(),
+            symbol: "info",
+        });
+        model.secondary = Some(if state.can_finish_unknown() {
+            ActionView { id: UiId::FinishUnknown, label: "已核实，结束等待".to_string(),
+                kind: ButtonKind::AccentQuiet, enabled: true }
+        } else {
+            ActionView { id: UiId::Fetch(FormScope::Modify), label: "查询原结果并同步列表".to_string(),
+                kind: ButtonKind::AccentQuiet, enabled: !state.sending() }
+        });
+    }
     model
 }
 

@@ -218,6 +218,8 @@ pub struct UiState {
     pub list_request: Option<ListRequest>,
     pub snapshot_token: Option<u64>,
     pub list_assembly: Option<ListAssembly>,
+    pub result_unknown: bool,
+    pub recovery_snapshot: Option<u64>,
 }
 
 impl UiState {
@@ -257,6 +259,8 @@ impl UiState {
             list_request: None,
             snapshot_token: None,
             list_assembly: None,
+            result_unknown: false,
+            recovery_snapshot: None,
         }
     }
 
@@ -483,6 +487,8 @@ impl UiState {
 
     /// 必须在发送宿主 await 前预约，回执可能早于传输回调。
     pub fn begin_result_wait(&mut self, pending: &PendingSend) {
+        self.result_unknown = false;
+        self.recovery_snapshot = None;
         self.result_request = Some(pending.clone());
         self.result_deadline = Some(pending.token);
         self.awaiting_confirmation = true;
@@ -523,6 +529,10 @@ impl UiState {
         if matches!((parsed.revision, minimum), (Some(current), Some(base)) if current < base) { return false; }
         let skipped = parsed.skipped;
         self.snapshot_token = Some(pending.token);
+        if self.result_unknown && self.result_request.as_ref().is_some_and(|original|
+            original.device_id == pending.device_id && pending.token > original.token) {
+            self.recovery_snapshot = Some(pending.token);
+        }
         self.list_request = None;
         self.list_assembly = None;
         self.all_events = parsed.events;
@@ -542,6 +552,27 @@ impl UiState {
 
     pub fn expire_snapshot(&mut self, token: u64) {
         if self.snapshot_token == Some(token) { self.snapshot_token = None; }
+        if self.recovery_snapshot == Some(token) { self.recovery_snapshot = None; }
+    }
+
+    pub fn can_finish_unknown(&self) -> bool {
+        self.result_unknown && !self.sending() && self.list_request.is_none()
+            && self.recovery_snapshot.is_some() && self.recovery_snapshot == self.snapshot_token
+            && self.result_request.as_ref().is_some_and(|original|
+                self.target_device.as_deref() == Some(original.device_id.as_str())
+                && self.snapshot_device.as_deref() == Some(original.device_id.as_str()))
+    }
+
+    pub fn finish_unknown_after_review(&mut self) -> bool {
+        if !self.can_finish_unknown() { return false; }
+        self.result_request = None;
+        self.result_deadline = None;
+        self.result_unknown = false;
+        self.recovery_snapshot = None;
+        self.awaiting_confirmation = false;
+        self.awaiting_revision = None;
+        self.status = Some(StatusMessage::info("已结束原请求等待，未重发操作；草稿已保留，请按核实结果决定下一步"));
+        true
     }
 
     pub fn accept_list_batch(&mut self, value: &serde_json::Value) -> bool {
@@ -607,6 +638,9 @@ impl UiState {
         { return false; }
         let kind = value.get("type").and_then(|v| v.as_str());
         if kind == Some("requestStatus") {
+            let unknown = matches!(value.get("status").and_then(|v| v.as_str()), Some("unknown" | "expired"));
+            if !unknown || !self.result_unknown { self.recovery_snapshot = None; }
+            self.result_unknown = unknown;
             self.status = Some(StatusMessage::info(match value.get("status").and_then(|v| v.as_str()) {
                 Some("processing") => "腕端仍在保存，请等待原请求结果",
                 _ => "原请求结果未知，请核实腕端数据；不要重复新增",
@@ -630,6 +664,8 @@ impl UiState {
             || code == "WATCHFACE_FAIL";
         self.finish_send(token);
         self.result_request = None;
+        self.result_unknown = false;
+        self.recovery_snapshot = None;
         self.result_deadline = None;
         self.awaiting_confirmation = false;
         self.awaiting_revision = None;
@@ -747,6 +783,59 @@ mod tests {
         let pending = state.claim_send(token).unwrap();
         state.begin_result_wait(&pending);
         (state, token)
+    }
+
+    #[test]
+    fn 未知结果须完整新快照及显式核实才解锁_迟到回执不串新请求() {
+        let (mut state, original) = waiting_result();
+        state.finish_send(original);
+        state.event_data.name = "草稿".into();
+        let mut status = result_message(original, true);
+        status["type"] = serde_json::json!("requestStatus");
+        status["status"] = serde_json::json!("unknown");
+        assert!(state.apply_request_message(&status));
+        assert!(!state.finish_unknown_after_review());
+        let token = state.reserve_send("{}".into(), SendPurpose::Fetch).unwrap();
+        state.attach_send_device(token, "watch".into());
+        let pending = state.claim_send(token).unwrap();
+        state.begin_list_wait(&pending, true);
+        let mut parsed = list_message(token, 11);
+        parsed.request_id = Some(pending.request_id.clone());
+        assert!(state.accept_event_list(parsed));
+        assert!(state.awaiting_confirmation, "刷新不能自动解锁");
+        assert!(state.can_finish_unknown());
+        let view = crate::ui::view::build(&state);
+        assert_eq!(view.secondary.as_ref().unwrap().id, crate::ui::dispatch::UiId::FinishUnknown);
+        assert!(!view.primary.as_ref().unwrap().enabled);
+        assert_eq!(crate::ui::dispatch::resolve("action.result.reviewed", crate::ui::dispatch::UiEventKind::Click, ""),
+            Some(crate::ui::dispatch::Action::FinishUnknown));
+        assert!(state.finish_unknown_after_review());
+        assert_eq!(state.event_data.name, "草稿");
+        assert!(!state.busy());
+        let newer = state.reserve_send("new".into(), SendPurpose::Mutation).unwrap();
+        assert!(!state.apply_request_message(&result_message(original, true)));
+        assert_eq!(state.pending_send.as_ref().unwrap().token, newer);
+    }
+
+    #[test]
+    fn 处理中及过期核实快照不能解除未知锁() {
+        let (mut state, token) = waiting_result();
+        state.finish_send(token);
+        state.result_unknown = true;
+        state.snapshot_device = Some("watch".into());
+        state.snapshot_token = Some(9);
+        state.recovery_snapshot = Some(9);
+        assert!(state.can_finish_unknown());
+        state.expire_snapshot(9);
+        assert!(!state.finish_unknown_after_review());
+        state.snapshot_token = Some(10);
+        state.recovery_snapshot = Some(10);
+        let mut status = result_message(token, true);
+        status["type"] = serde_json::json!("requestStatus");
+        status["status"] = serde_json::json!("processing");
+        state.apply_request_message(&status);
+        assert!(!state.finish_unknown_after_review());
+        assert!(state.awaiting_confirmation);
     }
 
     fn waiting_list(identified: bool) -> (UiState, u64) {

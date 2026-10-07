@@ -100,10 +100,12 @@ pub enum UiId {
     PickBackground,
     StatusDismiss,
     BackOverview,
+    FinishUnknown,
 }
 
 impl UiId {
-    pub const ALL: [UiId; 32] = [
+    pub const ALL: [UiId; 33] = [
+        UiId::FinishUnknown,
         UiId::Segment(EventType::AddEvent),
         UiId::Segment(EventType::ModifyEvent),
         UiId::Segment(EventType::DeleteEvent),
@@ -151,6 +153,7 @@ impl UiId {
             UiId::PickBackground => "action.background.pick".to_string(),
             UiId::BackOverview => "nav.back".to_string(),
             UiId::StatusDismiss => "status.dismiss".to_string(),
+            UiId::FinishUnknown => "action.result.reviewed".to_string(),
         }
     }
 
@@ -204,6 +207,7 @@ pub enum Action {
     CancelDelete,
     PickBackground,
     DismissStatus,
+    FinishUnknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,6 +263,7 @@ pub fn resolve(id: &str, kind: UiEventKind, payload: &str) -> Option<Action> {
         UiId::PageNext(scope) if click => Action::PageStep { scope, delta: 1 },
         UiId::PickBackground if click => Action::PickBackground,
         UiId::StatusDismiss if click => Action::DismissStatus,
+        UiId::FinishUnknown if click => Action::FinishUnknown,
         _ => return None,
     })
 }
@@ -286,6 +291,7 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
         return StateChange { action, rebuild: false, status: None };
     }
     match action.clone() {
+        Action::FinishUnknown => { rebuild = state.finish_unknown_after_review(); }
         Action::SwitchSegment(tab) => {
             if state.current_tab == tab && !state.route.is_editor() {
                 rebuild = false;
