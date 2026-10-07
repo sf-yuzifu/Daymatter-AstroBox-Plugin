@@ -161,6 +161,12 @@ pub struct ListRequest {
     pub identified: bool,
 }
 
+pub struct ListAssembly {
+    pub metadata: serde_json::Value,
+    pub batches: Vec<Option<serde_json::Value>>,
+    pub bytes: usize,
+}
+
 /// 子页路由：概览 → 独立编辑子页 → 返回概览（对齐漫画「概览卡片 + 独立编辑子页」）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
@@ -211,6 +217,7 @@ pub struct UiState {
     pub handshake_polls: u32,
     pub list_request: Option<ListRequest>,
     pub snapshot_token: Option<u64>,
+    pub list_assembly: Option<ListAssembly>,
 }
 
 impl UiState {
@@ -249,6 +256,7 @@ impl UiState {
             handshake_polls: 0,
             list_request: None,
             snapshot_token: None,
+            list_assembly: None,
         }
     }
 
@@ -326,7 +334,7 @@ impl UiState {
             return None;
         }
         self.send_sequence = self.send_sequence.wrapping_add(1);
-        if purpose == SendPurpose::Fetch { self.list_request = None; }
+        if purpose == SendPurpose::Fetch { self.list_request = None; self.list_assembly = None; }
         let token = self.send_sequence;
         self.pending_send = Some(PendingSend {
             token,
@@ -482,12 +490,16 @@ impl UiState {
     }
 
     pub fn begin_list_wait(&mut self, pending: &PendingSend, identified: bool) {
+        if self.list_request.as_ref().is_none_or(|request| request.pending.token != pending.token) {
+            self.list_assembly = None;
+        }
         self.list_request = Some(ListRequest { pending: pending.clone(), identified });
     }
 
     pub fn expire_list(&mut self, token: u64) -> bool {
         if !self.list_request.as_ref().is_some_and(|request| request.pending.token == token) { return false; }
         self.list_request = None;
+        self.list_assembly = None;
         self.finish_send(token);
         self.status = Some(StatusMessage::error("腕端列表接收超时，请重新同步；保留上次数据和草稿"));
         true
@@ -512,6 +524,7 @@ impl UiState {
         let skipped = parsed.skipped;
         self.snapshot_token = Some(pending.token);
         self.list_request = None;
+        self.list_assembly = None;
         self.all_events = parsed.events;
         self.has_fetched_events = true;
         self.apply_confirmed_list(parsed.primary_id, parsed.revision);
@@ -529,6 +542,60 @@ impl UiState {
 
     pub fn expire_snapshot(&mut self, token: u64) {
         if self.snapshot_token == Some(token) { self.snapshot_token = None; }
+    }
+
+    pub fn accept_list_batch(&mut self, value: &serde_json::Value) -> bool {
+        let Some(request) = self.list_request.as_ref() else { return false; };
+        if !request.identified
+            || value.get("requestId").and_then(|v| v.as_str()) != Some(request.pending.request_id.as_str())
+            || value.get("sessionId").and_then(|v| v.as_str()) != Some(request.pending.session_id.as_str())
+            || value.get("deviceId").and_then(|v| v.as_str()) != Some(request.pending.device_id.as_str()) { return false; }
+        let token = request.pending.token;
+        if value.get("type").and_then(|v| v.as_str()) == Some("eventListError") {
+            self.expire_list(token);
+            self.status = Some(StatusMessage::error("腕端列表传输失败，保留上次列表和草稿"));
+            return true;
+        }
+        let count = value.get("batchCount").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let index = value.get("batchIndex").and_then(|v| v.as_u64()).unwrap_or(u64::MAX) as usize;
+        let total = value.get("total").and_then(|v| v.as_u64()).unwrap_or(u64::MAX) as usize;
+        let data = value.get("data").and_then(|v| v.as_array());
+        let size = value.to_string().len();
+        let fail = |state: &mut Self| {
+            state.expire_list(token);
+            state.status = Some(StatusMessage::error("分批列表校验失败，保留上次列表和草稿"));
+            true
+        };
+        if count == 0 || count > 200 || index >= count || total > 200 || size > 8192
+            || data.is_none_or(|items| items.len() > 16)
+            || value.get("revision").and_then(|v| v.as_u64()).is_none() { return fail(self); }
+        let mut metadata = value.clone();
+        metadata.as_object_mut().unwrap().remove("data");
+        metadata.as_object_mut().unwrap().remove("batchIndex");
+        if self.list_assembly.is_none() {
+            self.list_assembly = Some(ListAssembly { metadata: metadata.clone(), batches: vec![None; count], bytes: 0 });
+        }
+        let assembly = self.list_assembly.as_mut().unwrap();
+        if assembly.metadata != metadata { return fail(self); }
+        if let Some(prior) = &assembly.batches[index] {
+            if prior != &value["data"] { return fail(self); }
+            return false;
+        }
+        assembly.bytes += size;
+        if assembly.bytes > crate::ui::protocol::MAX_MESSAGE_BYTES { return fail(self); }
+        assembly.batches[index] = Some(value["data"].clone());
+        if assembly.batches.iter().any(Option::is_none) { return false; }
+        let mut items = Vec::new();
+        for batch in &assembly.batches { items.extend(batch.as_ref().unwrap().as_array().unwrap().iter().cloned()); }
+        if items.len() != total { return fail(self); }
+        let mut complete = assembly.metadata.clone();
+        complete["data"] = serde_json::Value::Array(items);
+        match crate::ui::protocol::parse_event_list(&complete.to_string()) {
+            Ok(parsed) => {
+                if self.accept_event_list(parsed) { true } else { fail(self) }
+            }
+            Err(_) => fail(self),
+        }
     }
 
     pub fn apply_request_message(&mut self, value: &serde_json::Value) -> bool {
@@ -692,6 +759,67 @@ mod tests {
         let pending = state.claim_send(token).unwrap();
         state.begin_list_wait(&pending, identified);
         (state, token)
+    }
+
+    fn batch_message(token: u64, index: usize, name: &str) -> serde_json::Value {
+        serde_json::json!({"type":"eventListBatch", "requestId":format!("req-{token}"),
+            "sessionId":"session", "deviceId":"watch", "revision":11, "primaryId":"",
+            "total":2, "batchCount":2, "batchIndex":index,
+            "data":[{"name":name,"date":"2026-01-01"}]})
+    }
+
+    #[test]
+    fn 分批乱序重复仅在齐全后提交_原始下标和草稿保留() {
+        let (mut state, token) = waiting_list(true);
+        state.event_data.name = "草稿".into();
+        let second = batch_message(token, 1, "乙 🎂");
+        assert!(!state.accept_list_batch(&second));
+        assert!(!state.accept_list_batch(&second));
+        assert_eq!(state.all_events.len(), 3);
+        assert!(state.accept_list_batch(&batch_message(token, 0, "甲\"\\\n")));
+        assert_eq!(state.all_events[0].name, "甲\"\\\n");
+        assert_eq!(state.all_events[1].name, "乙 🎂");
+        assert_eq!(state.all_events[1].selection_key(0), "idx:1");
+        assert_eq!(state.event_data.name, "草稿");
+        assert!(state.list_assembly.is_none());
+        assert!(!state.accept_list_batch(&second));
+    }
+
+    #[test]
+    fn 分批冲突元数据数量与预算失败均保留旧列表() {
+        for issue in ["conflict", "revision", "total", "size", "count"] {
+            let (mut state, token) = waiting_list(true);
+            assert!(!state.accept_list_batch(&batch_message(token, 0, "甲")));
+            let mut next = batch_message(token, 1, "乙");
+            match issue {
+                "conflict" => next = batch_message(token, 0, "冲突"),
+                "revision" => next["revision"] = serde_json::json!(12),
+                "total" => next["total"] = serde_json::json!(3),
+                "size" => next["data"][0]["name"] = serde_json::json!("x".repeat(8192)),
+                _ => next["batchCount"] = serde_json::json!(201),
+            }
+            assert!(state.accept_list_batch(&next));
+            assert_eq!(state.all_events.len(), 3);
+            assert!(state.list_request.is_none());
+            assert!(state.list_assembly.is_none());
+        }
+    }
+
+    #[test]
+    fn 缺批超时与旧请求失败不影响新请求_空列表可提交() {
+        let (mut state, token) = waiting_list(true);
+        state.accept_list_batch(&batch_message(token, 0, "甲"));
+        assert!(!state.accept_list_batch(&batch_message(token + 1, 1, "旧")));
+        assert!(state.expire_list(token));
+        assert!(state.list_assembly.is_none());
+        assert_eq!(state.all_events.len(), 3);
+        let (mut state, token) = waiting_list(true);
+        let mut empty = batch_message(token, 0, "");
+        empty["data"] = serde_json::json!([]);
+        empty["total"] = serde_json::json!(0);
+        empty["batchCount"] = serde_json::json!(1);
+        assert!(state.accept_list_batch(&empty));
+        assert!(state.all_events.is_empty());
     }
 
     #[test]

@@ -236,9 +236,14 @@ pub async fn drive_pending_send(token: u64) {
         } else if pending.purpose == SendPurpose::Fetch {
             let identified = state.supports("listRequestId");
             state.begin_list_wait(&pending, identified);
-            let payload = if identified {
+            let mut payload = if identified {
                 protocol::set_request_identity_for(&pending.payload, &pending.request_id, &pending.session_id, &pending.device_id)
             } else { pending.payload.clone() };
+            if identified && state.supports("listBatches") {
+                let mut value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+                value["listBatches"] = serde_json::json!(true);
+                payload = value.to_string();
+            }
             (payload, false)
         } else { (pending.payload.clone(), false) }
     };

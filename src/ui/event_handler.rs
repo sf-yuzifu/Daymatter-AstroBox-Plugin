@@ -212,6 +212,19 @@ async fn pick_background() {
 /// 腕端互联消息：解析事件列表并刷新界面（E-12 无效条目与越界防护）
 pub async fn handle_interconnect_message(payload: &str) {
     if let Ok(value) = protocol::decode_message(payload) {
+        if matches!(value.get("type").and_then(|v| v.as_str()), Some("eventListBatch" | "eventListError")) {
+            let (render, token) = {
+                let mut state = write_state();
+                if state.accept_list_batch(&value) {
+                    (build::prepare_with(&mut state, true), state.snapshot_token)
+                } else { (None, None) }
+            };
+            if let Some(token) = token {
+                timer::set_timeout(message::LEGACY_SNAPSHOT_MS, &format!("{}{}", message::SNAPSHOT_TIMER, token));
+            }
+            build::render_prepared(render);
+            return;
+        }
         if value.get("type").and_then(|v| v.as_str()) == Some("capabilities") {
             let mut state = write_state();
             state.accept_capabilities(&value);

@@ -48,7 +48,7 @@ pub fn new_session_id(sequence: u64) -> String {
 
 pub fn capabilities(session_id: &str) -> String {
     json!({"type":"hello", "protocolVersion":PROTOCOL_VERSION, "sessionId":session_id,
-        "capabilities":["stableId","mutationResult","requestId","listRequestId","themeColor","primaryId","revision","backgroundJpeg"]}).to_string()
+        "capabilities":["stableId","mutationResult","requestId","listRequestId","listBatches","themeColor","primaryId","revision","backgroundJpeg"]}).to_string()
 }
 
 pub fn request_status(request_id: &str, session_id: &str) -> String {
