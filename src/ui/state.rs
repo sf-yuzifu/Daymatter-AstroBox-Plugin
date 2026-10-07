@@ -68,6 +68,7 @@ pub struct EventData {
     pub on_index: bool,
     pub if_staring_day: bool,
     pub theme_color: String,
+    pub source_index: Option<usize>,
 }
 
 impl EventData {
@@ -79,6 +80,7 @@ impl EventData {
             on_index,
             if_staring_day,
             theme_color: String::new(),
+            source_index: None,
         }
     }
 
@@ -96,7 +98,7 @@ impl EventData {
     /// 选择键：优先稳定 ID，旧数据无 ID 时退回下标前缀（E-11）
     pub fn selection_key(&self, index: usize) -> String {
         if self.id.is_empty() {
-            format!("idx:{}", index)
+            format!("idx:{}", self.source_index.unwrap_or(index))
         } else {
             format!("id:{}", self.id)
         }
@@ -208,6 +210,7 @@ pub struct UiState {
     pub handshake_ready: bool,
     pub handshake_polls: u32,
     pub list_request: Option<ListRequest>,
+    pub snapshot_token: Option<u64>,
 }
 
 impl UiState {
@@ -245,6 +248,7 @@ impl UiState {
             handshake_ready: false,
             handshake_polls: 0,
             list_request: None,
+            snapshot_token: None,
         }
     }
 
@@ -348,12 +352,14 @@ impl UiState {
         let payload: serde_json::Value = serde_json::from_str(&pending.payload).unwrap_or_default();
         let from_snapshot = matches!(payload.get("type").and_then(|v| v.as_str()), Some("changeEvent" | "deleteEvent"));
         if from_snapshot && self.snapshot_device.as_deref() != Some(device_addr.as_str()) { return false; }
+        if from_snapshot && payload.get("index").is_some() && self.snapshot_token.is_none() { return false; }
         if self.target_device.as_deref().is_some_and(|target| target != device_addr) {
             self.session_id = format!("{}-{}", self.session_id, self.send_sequence);
             self.all_events.clear();
             self.clear_selection();
             self.has_fetched_events = false;
             self.snapshot_device = None;
+            self.snapshot_token = None;
             self.list_request = None;
             self.revision = None;
             self.primary_id = None;
@@ -504,6 +510,7 @@ impl UiState {
         let minimum = self.revision.into_iter().chain(pending.base_revision).max();
         if matches!((parsed.revision, minimum), (Some(current), Some(base)) if current < base) { return false; }
         let skipped = parsed.skipped;
+        self.snapshot_token = Some(pending.token);
         self.list_request = None;
         self.all_events = parsed.events;
         self.has_fetched_events = true;
@@ -518,6 +525,10 @@ impl UiState {
             StatusMessage::info("列表已刷新，原请求结果仍待核实；不要重复新增")
         } else { StatusMessage::success(&format!("腕端列表已同步（跳过 {} 条无效数据）", skipped)) });
         true
+    }
+
+    pub fn expire_snapshot(&mut self, token: u64) {
+        if self.snapshot_token == Some(token) { self.snapshot_token = None; }
     }
 
     pub fn apply_request_message(&mut self, value: &serde_json::Value) -> bool {
@@ -681,6 +692,21 @@ mod tests {
         let pending = state.claim_send(token).unwrap();
         state.begin_list_wait(&pending, identified);
         (state, token)
+    }
+
+    #[test]
+    fn 旧下标快照过期拒绝写操作_旧timer不影响新快照() {
+        let (mut state, token) = waiting_list(false);
+        let parsed = crate::ui::protocol::parse_event_list(r#"{"data":[null,{"name":"旧端","date":"2026-01-01"}]}"#).unwrap();
+        assert!(state.accept_event_list(parsed));
+        let operation = state.reserve_send(r#"{"type":"deleteEvent","index":1}"#.into(), SendPurpose::Mutation).unwrap();
+        assert!(state.attach_send_device(operation, "watch".into()));
+        state.finish_send(operation);
+        state.expire_snapshot(token + 1);
+        assert_eq!(state.snapshot_token, Some(token));
+        state.expire_snapshot(token);
+        let operation = state.reserve_send(r#"{"type":"deleteEvent","index":1}"#.into(), SendPurpose::Mutation).unwrap();
+        assert!(!state.attach_send_device(operation, "watch".into()));
     }
 
     fn list_message(token: u64, revision: u64) -> crate::ui::protocol::ParsedEvents {

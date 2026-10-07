@@ -16,6 +16,10 @@ pub enum ParseIssue {
     NotJson,
     MissingData,
     NotArray,
+    TooLarge,
+    TooManyEvents,
+    InvalidMetadata,
+    DuplicateId,
 }
 
 impl ParseIssue {
@@ -24,6 +28,10 @@ impl ParseIssue {
             ParseIssue::NotJson => "手环端返回不是合法 JSON",
             ParseIssue::MissingData => "手环端返回缺少 data 字段",
             ParseIssue::NotArray => "手环端返回的 data 不是数组",
+            ParseIssue::TooLarge => "腕端消息超过接收预算，请更新或减少数据",
+            ParseIssue::TooManyEvents => "腕端事件超过 200 条，未替换现有列表",
+            ParseIssue::InvalidMetadata => "腕端列表身份或修订号字段无效",
+            ParseIssue::DuplicateId => "腕端列表包含重复 ID，不能安全操作",
         }
     }
 }
@@ -31,6 +39,8 @@ impl ParseIssue {
 pub const PKG_NAME: &str = "com.yzf.daymatter";
 pub const MIN_APP_VERSION_CODE: u32 = 21000;
 pub const PROTOCOL_VERSION: u32 = 2;
+pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
+pub const MAX_LIST_EVENTS: usize = 200;
 
 pub fn new_session_id(sequence: u64) -> String {
     format!("abp-{}-{}", std::process::id(), sequence)
@@ -110,6 +120,7 @@ pub fn add_background(base64_data: &str) -> String {
 
 /// 控制消息与列表共用宿主包装解码，最多展开四层。
 pub fn decode_message(payload: &str) -> Result<Value, ParseIssue> {
+    if payload.len() > MAX_MESSAGE_BYTES { return Err(ParseIssue::TooLarge); }
     let mut value: Value = serde_json::from_str(payload).map_err(|_| ParseIssue::NotJson)?;
     for _ in 0..4 {
         if let Some(text) = value.get("payloadText").or_else(|| value.get("payload")).and_then(Value::as_str) {
@@ -156,10 +167,28 @@ pub fn parse_event_list(payload: &str) -> Result<ParsedEvents, ParseIssue> {
         _ => return Err(ParseIssue::NotArray),
     };
 
+    if array.len() > MAX_LIST_EVENTS { return Err(ParseIssue::TooManyEvents); }
+    for field in ["requestId", "sessionId", "deviceId", "primaryId"] {
+        if let Some(value) = metadata.get(field) {
+            if !value.as_str().is_some_and(|text| text.len() <= 256 && (field == "primaryId" || !text.is_empty())) {
+                return Err(ParseIssue::InvalidMetadata);
+            }
+        }
+    }
+    if metadata.get("revision").is_some_and(|value| value.as_u64().is_none_or(|n| n > 9_007_199_254_740_991)) {
+        return Err(ParseIssue::InvalidMetadata);
+    }
+    // 即使某条事件其他字段无效，也不让相同 ID 的另一条被当作唯一身份。
+    let mut ids = std::collections::HashSet::new();
+    for item in array {
+        if let Some(id) = item.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+            if !ids.insert(id) { return Err(ParseIssue::DuplicateId); }
+        }
+    }
     let mut events = Vec::new();
     let mut skipped = 0;
-    for item in array {
-        match parse_event(item) {
+    for (index, item) in array.iter().enumerate() {
+        match parse_event(item, index) {
             Some(event) => events.push(event),
             None => skipped += 1,
         }
@@ -175,29 +204,40 @@ pub fn parse_event_list(payload: &str) -> Result<ParsedEvents, ParseIssue> {
     Ok(ParsedEvents { events, skipped, primary_id, revision, request_id, session_id, device_id })
 }
 
-fn parse_event(item: &Value) -> Option<EventData> {
+fn parse_event(item: &Value, index: usize) -> Option<EventData> {
     let object = item.as_object()?;
-    let name = object.get("name").and_then(|value| value.as_str()).unwrap_or("").to_string();
-    let time = object.get("date").and_then(|value| value.as_str()).unwrap_or("").to_string();
-    if name.is_empty() && time.is_empty() {
-        return None;
-    }
+    let name = object.get("name")?.as_str()?.to_string();
+    let time = object.get("date")?.as_str()?.to_string();
+    // 保留旧长名称，不静默截断；单字段仍有接收预算。
+    if name.trim().is_empty() || name.len() > 4096 || crate::ui::validation::validate_date_format(&time).is_err() { return None; }
+    let id = optional_text(object.get("id"), 256)?;
+    let theme_color = optional_text(object.get("themeColor"), 16)?;
+    if !theme_color.is_empty() && !["#3184d0", "#f78803", "#e74c3c", "#27ae60", "#9b59b6"].contains(&theme_color.as_str()) { return None; }
     Some(EventData {
-        id: object.get("id").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+        id,
         name,
         time,
         // 腕端旧数据可能是字符串布尔，宽松解析避免整条被丢
-        on_index: loose_bool(object.get("on_index")),
-        if_staring_day: loose_bool(object.get("IFStaringDay")),
-        theme_color: object.get("themeColor").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+        on_index: checked_bool(object.get("on_index"))?,
+        if_staring_day: checked_bool(object.get("IFStaringDay"))?,
+        theme_color,
+        source_index: Some(index),
     })
 }
 
-fn loose_bool(value: Option<&Value>) -> bool {
+fn optional_text(value: Option<&Value>, max: usize) -> Option<String> {
     match value {
-        Some(Value::Bool(flag)) => *flag,
-        Some(Value::String(text)) => text == "true",
-        _ => false,
+        None => Some(String::new()),
+        Some(value) => value.as_str().filter(|text| text.len() <= max).map(str::to_owned),
+    }
+}
+
+fn checked_bool(value: Option<&Value>) -> Option<bool> {
+    match value {
+        Some(Value::Bool(flag)) => Some(*flag),
+        Some(Value::String(text)) if text == "true" || text == "false" => Some(text == "true"),
+        None => Some(false),
+        _ => None,
     }
 }
 
@@ -206,6 +246,58 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+
+    #[test]
+    fn 跳过异常条目仍按原数组下标选择修改删除() {
+        let parsed = parse_event_list(&json!({"data":[null,
+            {"name":"合法", "date":"2026-01-01"},
+            {"name":"非法日期", "date":"2026-02-30"},
+            {"name":"另一条", "date":"2026-03-01"}]}).to_string()).unwrap();
+        assert_eq!(parsed.skipped, 2);
+        assert_eq!(parsed.events[0].selection_key(0), "idx:1");
+        assert_eq!(parsed.events[1].selection_key(1), "idx:3");
+        let mut state = crate::ui::state::UiState::new("2026-10-07".into());
+        state.all_events = parsed.events;
+        assert_eq!(state.index_of_key("idx:3"), Some(1));
+        assert_eq!(state.index_of_key("idx:0"), None);
+        let command: Value = serde_json::from_str(&delete_event(&EventRef::Index(3))).unwrap();
+        assert_eq!(command["index"], 3);
+    }
+
+    #[test]
+    fn 严格字段校验保留旧长名称且无效项跳过() {
+        let long_name = "旧".repeat(60);
+        let parsed = parse_event_list(&json!({"data":[
+            {"name":long_name,"date":"2026-01-01","on_index":"true"},
+            {"name":123,"date":"2026-01-01"},
+            {"name":"a","date":"中文日期ab"},
+            {"name":"a","date":"2026-01-01","on_index":"yes"},
+            {"name":"a","date":"2026-01-01","themeColor":"#ffffff"},
+            {"name":"a","date":"2026-01-01","id":42}
+        ]}).to_string()).unwrap();
+        assert_eq!(parsed.events.len(), 1);
+        assert_eq!(parsed.skipped, 5);
+        assert_eq!(parsed.events[0].name, long_name);
+    }
+
+    #[test]
+    fn 重复ID和畸形元数据拒绝整批() {
+        let item = json!({"id":"same","name":"甲","date":"2026-01-01"});
+        assert_eq!(parse_event_list(&json!({"data":[item,item]}).to_string()), Err(ParseIssue::DuplicateId));
+        for metadata in [json!({"revision":-1}), json!({"revision":"1"}),
+            json!({"requestId":3}), json!({"sessionId":""})] {
+            let mut value = metadata;
+            value["data"] = json!([]);
+            assert_eq!(parse_event_list(&value.to_string()), Err(ParseIssue::InvalidMetadata));
+        }
+    }
+
+    #[test]
+    fn 接收字节与数量预算在构造列表前拒绝() {
+        assert_eq!(decode_message(&" ".repeat(MAX_MESSAGE_BYTES + 1)), Err(ParseIssue::TooLarge));
+        assert_eq!(parse_event_list(&json!({"data":vec![Value::Null;201]}).to_string()), Err(ParseIssue::TooManyEvents));
+        assert_eq!(parse_event_list(&json!({"data":vec![Value::Null;200]}).to_string()).unwrap().skipped, 200);
+    }
 
     #[test]
     fn 控制回包统一解开宿主包装() {

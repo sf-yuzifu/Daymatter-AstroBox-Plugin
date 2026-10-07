@@ -26,7 +26,7 @@ pub fn validate_date_format(date_str: &str) -> Result<(), DateValidationError> {
         return Err(DateValidationError::Empty);
     }
 
-    if date_str.len() != 10 {
+    if date_str.len() != 10 || !date_str.is_ascii() {
         return Err(DateValidationError::InvalidFormat);
     }
 

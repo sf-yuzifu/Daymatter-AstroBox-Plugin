@@ -22,6 +22,8 @@ pub const RESULT_TIMER: &str = "request_result:";
 pub const HANDSHAKE_POLL_MS: u64 = 250;
 pub const HANDSHAKE_MAX_POLLS: u32 = 8;
 pub const LIST_TIMER: &str = "list_result:";
+pub const SNAPSHOT_TIMER: &str = "snapshot_expire:";
+pub const LEGACY_SNAPSHOT_MS: u64 = 60000;
 
 /// 状态面板常驻：成功 / 失败不再自动消失，用户可对照腕端核实（P1-51）
 ///
@@ -214,6 +216,11 @@ pub async fn drive_pending_send(token: u64) {
         return;
     }
     let business: serde_json::Value = serde_json::from_str(&pending.payload).unwrap_or_default();
+    if business.get("index").is_some() && read_state().snapshot_token.is_none() {
+        clear_reservation(token);
+        set_status_timed(StatusKind::Error, "旧端列表已过期，请重新同步后操作；业务消息未发送");
+        return;
+    }
     if business.get("id").is_some() && !read_state().supports("stableId") {
         clear_reservation(token);
         set_status_timed(StatusKind::Error, "腕端未确认稳定 ID 能力，请更新腕端后重新同步；业务消息未发送");
@@ -334,6 +341,10 @@ pub async fn confirm_delete(event: &crate::ui::state::EventData) -> bool {
 /// 宿主定时器事件分派
 pub async fn handle_timer_event(payload: &str) {
     let payload = unwrap_timer_payload(payload);
+    if let Some(token) = payload.strip_prefix(SNAPSHOT_TIMER).and_then(|value| value.parse::<u64>().ok()) {
+        write_state().expire_snapshot(token);
+        return;
+    }
     if let Some(token) = payload.strip_prefix(LIST_TIMER).and_then(|value| value.parse::<u64>().ok()) {
         let render = {
             let mut state = write_state();

@@ -18,7 +18,7 @@ fn map_event_kind(event: &ui::Event) -> Option<UiEventKind> {
     }
 }
 
-use crate::astrobox::psys_host_v4::ui;
+use crate::astrobox::psys_host_v4::{ui, timer};
 
 pub async fn ui_event_processor(event_type: ui::Event, event_id: &str, event_payload: &str) {
     tracing::info!("UI 事件: id={}, type={:?}", event_id, event_type);
@@ -228,10 +228,17 @@ pub async fn handle_interconnect_message(payload: &str) {
     }
     match protocol::parse_event_list(payload) {
         Ok(parsed) => {
+            let mut accepted_token = None;
             let request = {
                 let mut state = write_state();
-                if state.accept_event_list(parsed) { build::prepare_with(&mut state, true) } else { None }
+                if state.accept_event_list(parsed) {
+                    accepted_token = state.snapshot_token;
+                    build::prepare_with(&mut state, true)
+                } else { None }
             };
+            if let Some(token) = accepted_token {
+                timer::set_timeout(message::LEGACY_SNAPSHOT_MS, &format!("{}{}", message::SNAPSHOT_TIMER, token));
+            }
             build::render_prepared(request);
         }
         Err(issue) => {
