@@ -21,6 +21,7 @@ pub const RESULT_TIMEOUT_MS: u64 = 8000;
 pub const RESULT_TIMER: &str = "request_result:";
 pub const HANDSHAKE_POLL_MS: u64 = 250;
 pub const HANDSHAKE_MAX_POLLS: u32 = 8;
+pub const LIST_TIMER: &str = "list_result:";
 
 /// 状态面板常驻：成功 / 失败不再自动消失，用户可对照腕端核实（P1-51）
 ///
@@ -225,8 +226,18 @@ pub async fn drive_pending_send(token: u64) {
         if enabled {
             state.begin_result_wait(&pending);
             (protocol::set_request_identity_for(&pending.payload, &pending.request_id, &pending.session_id, &pending.device_id), true)
+        } else if pending.purpose == SendPurpose::Fetch {
+            let identified = state.supports("listRequestId");
+            state.begin_list_wait(&pending, identified);
+            let payload = if identified {
+                protocol::set_request_identity_for(&pending.payload, &pending.request_id, &pending.session_id, &pending.device_id)
+            } else { pending.payload.clone() };
+            (payload, false)
         } else { (pending.payload.clone(), false) }
     };
+    if pending.purpose == SendPurpose::Fetch {
+        timer::set_timeout(RESULT_TIMEOUT_MS, &format!("{}{}", LIST_TIMER, token));
+    }
     let result =
         interconnect::send_qaic_message(pending.device_addr.clone(), PKG_NAME.to_string(), payload)
             .await;
@@ -323,6 +334,14 @@ pub async fn confirm_delete(event: &crate::ui::state::EventData) -> bool {
 /// 宿主定时器事件分派
 pub async fn handle_timer_event(payload: &str) {
     let payload = unwrap_timer_payload(payload);
+    if let Some(token) = payload.strip_prefix(LIST_TIMER).and_then(|value| value.parse::<u64>().ok()) {
+        let render = {
+            let mut state = write_state();
+            if state.expire_list(token) { build::prepare_with(&mut state, false) } else { None }
+        };
+        build::render_prepared(render);
+        return;
+    }
     if payload == HIDE_MESSAGE_TIMER {
         hide_message();
         return;

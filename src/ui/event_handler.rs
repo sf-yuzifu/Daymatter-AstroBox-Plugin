@@ -7,7 +7,7 @@ use crate::ui::build;
 use crate::ui::dispatch::{self, Action, UiEventKind};
 use crate::ui::message::{self, SendStartError};
 use crate::ui::protocol::{self, EventRef};
-use crate::ui::state::{read_state, write_state, EventData, FormScope, SendPurpose, StatusKind, StatusMessage};
+use crate::ui::state::{read_state, write_state, EventData, FormScope, SendPurpose, StatusKind};
 use crate::ui::validation::validate_date_format;
 
 fn map_event_kind(event: &ui::Event) -> Option<UiEventKind> {
@@ -228,38 +228,16 @@ pub async fn handle_interconnect_message(payload: &str) {
     }
     match protocol::parse_event_list(payload) {
         Ok(parsed) => {
-            let skipped = parsed.skipped;
             let request = {
                 let mut state = write_state();
-                let envelope: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
-                let envelope = envelope.get("data").unwrap_or(&envelope);
-                if let Some(session) = envelope.get("sessionId").and_then(|v| v.as_str()) {
-                    if session != state.session_id { return; }
-                }
-                if state.target_device.is_none() { return; }
-                state.all_events = parsed.events;
-                state.has_fetched_events = true;
-                state.event_page = 0;
-                state.apply_confirmed_list(parsed.primary_id, parsed.revision);
-                if let Some(key) = state.selected_event_key.clone() {
-                    if state.index_of_key(&key).is_none() {
-                        state.clear_selection();
-                    }
-                }
-                let text = if skipped > 0 {
-                    format!("{}（{} 条数据无效已跳过）", dispatch::FETCH_SUCCESS_TEXT, skipped)
-                } else {
-                    dispatch::FETCH_SUCCESS_TEXT.to_string()
-                };
-                state.status = Some(if state.result_request.is_some() {
-                    StatusMessage::info("列表已刷新，原请求结果仍待核实；不要重复新增")
-                } else { StatusMessage::success(&text) });
-                build::prepare_with(&mut state, true)
+                if state.accept_event_list(parsed) { build::prepare_with(&mut state, true) } else { None }
             };
             build::render_prepared(request);
         }
         Err(issue) => {
-            message::set_status_timed(StatusKind::Error, issue.message());
+            if read_state().list_request.is_some() {
+                message::set_status_timed(StatusKind::Error, issue.message());
+            }
         }
     }
 }

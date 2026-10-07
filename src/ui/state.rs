@@ -153,6 +153,12 @@ pub enum SendPurpose {
     Background,
 }
 
+#[derive(Debug, Clone)]
+pub struct ListRequest {
+    pub pending: PendingSend,
+    pub identified: bool,
+}
+
 /// 子页路由：概览 → 独立编辑子页 → 返回概览（对齐漫画「概览卡片 + 独立编辑子页」）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
@@ -201,6 +207,7 @@ pub struct UiState {
     pub handshake_token: Option<u64>,
     pub handshake_ready: bool,
     pub handshake_polls: u32,
+    pub list_request: Option<ListRequest>,
 }
 
 impl UiState {
@@ -237,6 +244,7 @@ impl UiState {
             handshake_token: None,
             handshake_ready: false,
             handshake_polls: 0,
+            list_request: None,
         }
     }
 
@@ -314,6 +322,7 @@ impl UiState {
             return None;
         }
         self.send_sequence = self.send_sequence.wrapping_add(1);
+        if purpose == SendPurpose::Fetch { self.list_request = None; }
         let token = self.send_sequence;
         self.pending_send = Some(PendingSend {
             token,
@@ -345,6 +354,7 @@ impl UiState {
             self.clear_selection();
             self.has_fetched_events = false;
             self.snapshot_device = None;
+            self.list_request = None;
             self.revision = None;
             self.primary_id = None;
             self.protocol_v2 = false;
@@ -463,6 +473,51 @@ impl UiState {
         self.result_deadline = Some(pending.token);
         self.awaiting_confirmation = true;
         self.awaiting_revision = pending.base_revision;
+    }
+
+    pub fn begin_list_wait(&mut self, pending: &PendingSend, identified: bool) {
+        self.list_request = Some(ListRequest { pending: pending.clone(), identified });
+    }
+
+    pub fn expire_list(&mut self, token: u64) -> bool {
+        if !self.list_request.as_ref().is_some_and(|request| request.pending.token == token) { return false; }
+        self.list_request = None;
+        self.finish_send(token);
+        self.status = Some(StatusMessage::error("腕端列表接收超时，请重新同步；保留上次数据和草稿"));
+        true
+    }
+
+    /// 所有验证先完成，再切换快照；刷新不把远端数据写进编辑草稿。
+    pub fn accept_event_list(&mut self, parsed: crate::ui::protocol::ParsedEvents) -> bool {
+        let Some(request) = self.list_request.as_ref() else { return false; };
+        let pending = &request.pending;
+        if self.target_device.as_deref() != Some(pending.device_id.as_str()) || self.session_id != pending.session_id {
+            return false;
+        }
+        if request.identified {
+            if parsed.revision.is_none() || parsed.request_id.as_deref() != Some(pending.request_id.as_str())
+                || parsed.session_id.as_deref() != Some(pending.session_id.as_str())
+                || parsed.device_id.as_deref() != Some(pending.device_id.as_str()) { return false; }
+        } else if parsed.request_id.as_deref().is_some_and(|id| id != pending.request_id)
+            || parsed.session_id.as_deref().is_some_and(|id| id != pending.session_id)
+            || parsed.device_id.as_deref().is_some_and(|id| id != pending.device_id) { return false; }
+        let minimum = self.revision.into_iter().chain(pending.base_revision).max();
+        if matches!((parsed.revision, minimum), (Some(current), Some(base)) if current < base) { return false; }
+        let skipped = parsed.skipped;
+        self.list_request = None;
+        self.all_events = parsed.events;
+        self.has_fetched_events = true;
+        self.apply_confirmed_list(parsed.primary_id, parsed.revision);
+        self.event_page = self.event_page.min(self.max_page().saturating_sub(1));
+        if self.selected_event_key.as_deref().is_some_and(|key| self.index_of_key(key).is_none()) {
+            // 选择失效，但保留用户未提交的表单，不自动装载其他事件。
+            self.selected_event_key = None;
+            self.pending_delete_key = None;
+        }
+        self.status = Some(if self.result_request.is_some() {
+            StatusMessage::info("列表已刷新，原请求结果仍待核实；不要重复新增")
+        } else { StatusMessage::success(&format!("腕端列表已同步（跳过 {} 条无效数据）", skipped)) });
+        true
     }
 
     pub fn apply_request_message(&mut self, value: &serde_json::Value) -> bool {
@@ -614,6 +669,83 @@ mod tests {
         let pending = state.claim_send(token).unwrap();
         state.begin_result_wait(&pending);
         (state, token)
+    }
+
+    fn waiting_list(identified: bool) -> (UiState, u64) {
+        let mut state = state_with_events();
+        state.target_device = Some("watch".into());
+        state.session_id = "session".into();
+        state.revision = Some(10);
+        let token = state.reserve_send(r#"{"type":"getAllEvent"}"#.into(), SendPurpose::Fetch).unwrap();
+        state.attach_send_device(token, "watch".into());
+        let pending = state.claim_send(token).unwrap();
+        state.begin_list_wait(&pending, identified);
+        (state, token)
+    }
+
+    fn list_message(token: u64, revision: u64) -> crate::ui::protocol::ParsedEvents {
+        crate::ui::protocol::parse_event_list(&serde_json::json!({"data":[{"id":"e1", "name":"远端", "date":"2026-12-01"}],
+            "requestId":format!("req-{token}"), "sessionId":"session", "deviceId":"watch", "revision":revision}).to_string()).unwrap()
+    }
+
+    #[test]
+    fn 列表身份校验拒绝旧请求会话设备及revision_拒绝不改快照() {
+        let (mut state, token) = waiting_list(true);
+        for field in ["request", "session", "device", "revision"] {
+            let mut parsed = list_message(token, 11);
+            match field {
+                "request" => parsed.request_id = Some("old".into()),
+                "session" => parsed.session_id = Some("old".into()),
+                "device" => parsed.device_id = Some("other".into()),
+                _ => parsed.revision = Some(9),
+            }
+            assert!(!state.accept_event_list(parsed));
+            assert_eq!(state.all_events.len(), 3);
+            assert!(state.list_request.is_some());
+        }
+        assert!(state.accept_event_list(list_message(token, 11)));
+        assert!(state.finish_send(token).is_none(), "早到列表消费发送token");
+        assert!(!state.accept_event_list(list_message(token, 12)), "重复回包不结算");
+        assert_eq!(state.revision, Some(11));
+    }
+
+    #[test]
+    fn 新拉取替代旧请求_超时后迟到列表不能更新() {
+        let (mut state, old) = waiting_list(true);
+        state.finish_send(old);
+        let token = state.reserve_send("{}".into(), SendPurpose::Fetch).unwrap();
+        state.attach_send_device(token, "watch".into());
+        let pending = state.claim_send(token).unwrap();
+        state.begin_list_wait(&pending, true);
+        assert!(!state.accept_event_list(list_message(old, 11)));
+        assert!(!state.expire_list(old));
+        assert!(state.expire_list(token));
+        assert!(!state.accept_event_list(list_message(token, 11)));
+        assert_eq!(state.all_events.len(), 3);
+    }
+
+    #[test]
+    fn 刷新保留新增修改草稿_选择失效不清空未提交表单() {
+        let (mut state, token) = waiting_list(true);
+        state.select_event("id:e2");
+        state.modify_event_data.name = "未提交修改".into();
+        state.event_data.name = "未提交新增".into();
+        assert!(state.accept_event_list(list_message(token, 11)));
+        assert!(state.selected_event_key.is_none());
+        assert_eq!(state.modify_event_data.name, "未提交修改");
+        assert_eq!(state.event_data.name, "未提交新增");
+        assert_eq!(state.snapshot_device.as_deref(), Some("watch"));
+    }
+
+    #[test]
+    fn 旧端列表仅在拉取窗口接收_新协议不接受无身份列表() {
+        let old = r#"{"data":[{"name":"旧端","date":"2026-01-01"}]}"#;
+        let (mut state, _) = waiting_list(true);
+        assert!(!state.accept_event_list(crate::ui::protocol::parse_event_list(old).unwrap()));
+        let (mut state, token) = waiting_list(false);
+        assert!(state.accept_event_list(crate::ui::protocol::parse_event_list(old).unwrap()));
+        assert!(!state.accept_event_list(crate::ui::protocol::parse_event_list(old).unwrap()));
+        assert!(!state.expire_list(token));
     }
 
     #[test]

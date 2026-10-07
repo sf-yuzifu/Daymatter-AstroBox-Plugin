@@ -38,7 +38,7 @@ pub fn new_session_id(sequence: u64) -> String {
 
 pub fn capabilities(session_id: &str) -> String {
     json!({"type":"hello", "protocolVersion":PROTOCOL_VERSION, "sessionId":session_id,
-        "capabilities":["stableId","mutationResult","requestId","themeColor","primaryId","revision","backgroundJpeg"]}).to_string()
+        "capabilities":["stableId","mutationResult","requestId","listRequestId","themeColor","primaryId","revision","backgroundJpeg"]}).to_string()
 }
 
 pub fn request_status(request_id: &str, session_id: &str) -> String {
@@ -128,18 +128,13 @@ pub struct ParsedEvents {
     pub skipped: usize,
     pub primary_id: Option<String>,
     pub revision: Option<u64>,
+    pub request_id: Option<String>,
+    pub session_id: Option<String>,
+    pub device_id: Option<String>,
 }
 
 pub fn parse_event_list(payload: &str) -> Result<ParsedEvents, ParseIssue> {
-    let outer: Value = serde_json::from_str(payload).map_err(|_| ParseIssue::NotJson)?;
-    let wrapped_text = outer
-        .get("payloadText")
-        .or_else(|| outer.get("payload"))
-        .and_then(Value::as_str);
-    let inner: Value = match wrapped_text {
-        Some(text) => serde_json::from_str(text).map_err(|_| ParseIssue::NotJson)?,
-        None => outer,
-    };
+    let inner = decode_message(payload)?;
     let data = inner.get("data").ok_or(ParseIssue::MissingData)?;
     // App `connect.send({data: {data: events, primaryId, revision}})` nests
     // the list under data.data; older envelopes send data as an array directly.
@@ -151,7 +146,7 @@ pub fn parse_event_list(payload: &str) -> Result<ParsedEvents, ParseIssue> {
                 .or_else(|| map.get("events"))
                 .and_then(Value::as_array)
                 .ok_or(ParseIssue::NotArray)?;
-            let metadata = if map.get("primaryId").is_some() || map.get("revision").is_some() {
+            let metadata = if map.get("primaryId").is_some() || map.get("revision").is_some() || map.get("requestId").is_some() {
                 data
             } else {
                 &inner
@@ -174,7 +169,10 @@ pub fn parse_event_list(payload: &str) -> Result<ParsedEvents, ParseIssue> {
         .and_then(|value| value.as_str())
         .map(str::to_string);
     let revision = metadata.get("revision").and_then(Value::as_u64);
-    Ok(ParsedEvents { events, skipped, primary_id, revision })
+    let request_id = metadata.get("requestId").and_then(Value::as_str).map(str::to_owned);
+    let session_id = metadata.get("sessionId").and_then(Value::as_str).map(str::to_owned);
+    let device_id = metadata.get("deviceId").and_then(Value::as_str).map(str::to_owned);
+    Ok(ParsedEvents { events, skipped, primary_id, revision, request_id, session_id, device_id })
 }
 
 fn parse_event(item: &Value) -> Option<EventData> {
