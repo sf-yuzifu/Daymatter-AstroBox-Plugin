@@ -108,6 +108,19 @@ pub fn add_background(base64_data: &str) -> String {
     json!({"type": "addBG", "bgBase64": base64_data}).to_string()
 }
 
+/// 控制消息与列表共用宿主包装解码，最多展开四层。
+pub fn decode_message(payload: &str) -> Result<Value, ParseIssue> {
+    let mut value: Value = serde_json::from_str(payload).map_err(|_| ParseIssue::NotJson)?;
+    for _ in 0..4 {
+        if let Some(text) = value.get("payloadText").or_else(|| value.get("payload")).and_then(Value::as_str) {
+            value = serde_json::from_str(text).map_err(|_| ParseIssue::NotJson)?;
+        } else if value.get("type").is_none() && value.get("data").is_some_and(Value::is_object) {
+            value = value["data"].clone();
+        } else { break; }
+    }
+    Ok(value)
+}
+
 /// 解析腕端事件列表：兼容 `payloadText` 包裹；单条异常只跳过该条并计数
 #[derive(Debug, PartialEq)]
 pub struct ParsedEvents {
@@ -195,6 +208,16 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+
+    #[test]
+    fn 控制回包统一解开宿主包装() {
+        let result = json!({"type":"mutationResult", "requestId":"req-1", "ok":true});
+        for wrapped in [result.clone(), json!({"data":result}),
+            json!({"payloadText":json!({"data":result}).to_string()}),
+            json!({"payload":result.to_string()})] {
+            assert_eq!(decode_message(&wrapped.to_string()).unwrap(), result);
+        }
+    }
 
     #[test]
     fn 名称含引号反斜杠换行时消息仍是合法JSON() {

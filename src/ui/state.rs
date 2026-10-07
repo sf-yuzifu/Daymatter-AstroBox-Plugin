@@ -195,6 +195,8 @@ pub struct UiState {
     pub protocol_v2: bool,
     pub capabilities: Vec<String>,
     pub result_deadline: Option<u64>,
+    /// 独立于 timer 的原请求身份；查询超时后仍接受迟到结果。
+    pub result_request: Option<PendingSend>,
 }
 
 impl UiState {
@@ -226,6 +228,7 @@ impl UiState {
             protocol_v2: false,
             capabilities: Vec::new(),
             result_deadline: None,
+            result_request: None,
         }
     }
 
@@ -366,7 +369,7 @@ impl UiState {
             // the fetch token here so its later timer completion is harmless.
             self.pending_send = None;
         }
-        if self.awaiting_confirmation {
+        if self.awaiting_confirmation && self.result_request.is_none() {
             let fresh_enough = match (revision, self.awaiting_revision) {
                 (Some(current), Some(base)) => current >= base,
                 // Old app versions don't send revision; retain compatibility.
@@ -387,6 +390,66 @@ impl UiState {
         let already_confirmed = matches!((self.revision, base_revision), (Some(current), Some(base)) if current > base);
         self.awaiting_confirmation = !already_confirmed;
         self.awaiting_revision = if already_confirmed { None } else { base_revision };
+    }
+
+    /// 必须在发送宿主 await 前预约，回执可能早于传输回调。
+    pub fn begin_result_wait(&mut self, pending: &PendingSend) {
+        self.result_request = Some(pending.clone());
+        self.result_deadline = Some(pending.token);
+        self.awaiting_confirmation = true;
+        self.awaiting_revision = pending.base_revision;
+    }
+
+    pub fn apply_request_message(&mut self, value: &serde_json::Value) -> bool {
+        let Some(request) = self.result_request.as_ref() else { return false; };
+        if value.get("requestId").and_then(|v| v.as_str()) != Some(request.request_id.as_str())
+            || value.get("sessionId").and_then(|v| v.as_str()) != Some(request.session_id.as_str())
+            || value.get("deviceId").and_then(|v| v.as_str()) != Some(request.device_id.as_str())
+            || self.target_device.as_deref() != Some(request.device_id.as_str())
+        { return false; }
+        let kind = value.get("type").and_then(|v| v.as_str());
+        if kind == Some("requestStatus") {
+            self.status = Some(StatusMessage::info(match value.get("status").and_then(|v| v.as_str()) {
+                Some("processing") => "腕端仍在保存，请等待原请求结果",
+                _ => "原请求结果未知，请核实腕端数据；不要重复新增",
+            }));
+            return true;
+        }
+        if kind != Some("mutationResult") { return false; }
+        let Some(ok) = value.get("ok").and_then(|v| v.as_bool()) else { return false; };
+        let revision = value.get("revision").and_then(|v| v.as_u64());
+        if ok && matches!((revision, request.base_revision), (Some(current), Some(base)) if current < base) {
+            return false;
+        }
+        let token = request.token;
+        let code = value.get("code").and_then(|v| v.as_str()).unwrap_or("");
+        if !ok && code == "REQUEST_CONFLICT" {
+            self.status = Some(StatusMessage::error("请求身份冲突，原请求可能仍在保存；请查询原结果，不要重复新增"));
+            return true;
+        }
+        let partial = value.get("primary").and_then(|v| v.get("ok")).and_then(|v| v.as_bool()) == Some(false)
+            || value.get("watchface").and_then(|v| v.get("ok")).and_then(|v| v.as_bool()) == Some(false)
+            || code == "WATCHFACE_FAIL";
+        self.finish_send(token);
+        self.result_request = None;
+        self.result_deadline = None;
+        self.awaiting_confirmation = false;
+        self.awaiting_revision = None;
+        if ok {
+            if let Some(revision) = revision { self.revision = Some(self.revision.unwrap_or(0).max(revision)); }
+            self.status = Some(if partial {
+                StatusMessage::error("事件已保存，但主事件或表盘同步失败；请核实分项结果，不要重复新增")
+            } else { StatusMessage::success("腕端已保存") });
+        } else {
+            self.status = Some(StatusMessage::error(&format!("腕端拒绝保存（{}），可修正后重试", code)));
+            if code == "REQUEST_CACHE_FULL" {
+                // 明确拒绝且原请求未执行，下一次显式操作使用新会话。
+                self.session_id = format!("{}-next-{}", self.session_id, token);
+                self.protocol_v2 = false;
+                self.capabilities.clear();
+            }
+        }
+        true
     }
 
     pub fn clear_selection(&mut self) {
@@ -475,6 +538,103 @@ mod tests {
             EventData { name: "无ID".into(), time: "2026-03-03".into(), ..Default::default() },
         ];
         state
+    }
+
+    fn waiting_result() -> (UiState, u64) {
+        let mut state = UiState::new("2026-10-07".into());
+        state.session_id = "session".into();
+        state.revision = Some(10);
+        let token = state.reserve_send("{}".into(), SendPurpose::Mutation).unwrap();
+        state.attach_send_device(token, "watch".into());
+        let pending = state.claim_send(token).unwrap();
+        state.begin_result_wait(&pending);
+        (state, token)
+    }
+
+    fn result_message(token: u64, ok: bool) -> serde_json::Value {
+        serde_json::json!({"type":"mutationResult", "requestId":format!("req-{token}"),
+            "sessionId":"session", "deviceId":"watch", "ok":ok, "revision":11})
+    }
+
+    #[test]
+    fn 保存回执先于传输回调且重复回执不重新结算() {
+        let (mut state, token) = waiting_result();
+        let result = result_message(token, true);
+        assert!(state.apply_request_message(&result));
+        assert!(state.finish_send(token).is_none());
+        assert!(!state.busy());
+        assert_eq!(state.revision, Some(11));
+        assert!(!state.apply_request_message(&result));
+        let newer = state.reserve_send("new".into(), SendPurpose::Mutation).unwrap();
+        assert!(!state.apply_request_message(&result));
+        assert_eq!(state.pending_send.as_ref().unwrap().token, newer);
+    }
+
+    #[test]
+    fn 查询后迟到回执仍接收_刷新不能解锁原请求() {
+        let (mut state, token) = waiting_result();
+        state.finish_send(token);
+        state.result_deadline = None;
+        state.apply_confirmed_list(None, Some(11));
+        assert!(state.awaiting_confirmation);
+        assert!(state.reserve_send("duplicate".into(), SendPurpose::Mutation).is_none());
+        let status = serde_json::json!({"type":"requestStatus", "requestId":format!("req-{token}"),
+            "sessionId":"session", "deviceId":"watch", "status":"processing"});
+        assert!(state.apply_request_message(&status));
+        assert!(state.awaiting_confirmation);
+        assert!(state.apply_request_message(&result_message(token, true)));
+        assert!(!state.busy());
+    }
+
+    #[test]
+    fn 明确失败解锁_表盘分项失败不提示重复新增() {
+        let (mut state, token) = waiting_result();
+        let mut failed = result_message(token, false);
+        failed["code"] = serde_json::json!("NAME_TOO_LONG");
+        assert!(state.apply_request_message(&failed));
+        assert!(!state.busy());
+        let (mut state, token) = waiting_result();
+        let mut partial = result_message(token, true);
+        partial["watchface"] = serde_json::json!({"ok":false});
+        assert!(state.apply_request_message(&partial));
+        assert!(!state.busy());
+        assert_eq!(state.status.as_ref().unwrap().kind, StatusKind::Error);
+        assert!(state.status.as_ref().unwrap().text.contains("事件已保存"));
+    }
+
+    #[test]
+    fn 原请求未知保留锁_错误身份和旧revision不结算() {
+        let (mut state, token) = waiting_result();
+        let mut result = result_message(token, true);
+        result["sessionId"] = serde_json::json!("stale");
+        assert!(!state.apply_request_message(&result));
+        result["sessionId"] = serde_json::json!("session");
+        result["deviceId"] = serde_json::json!("other");
+        assert!(!state.apply_request_message(&result));
+        result["deviceId"] = serde_json::json!("watch");
+        result["revision"] = serde_json::json!(9);
+        assert!(!state.apply_request_message(&result));
+        result["type"] = serde_json::json!("requestStatus");
+        result["status"] = serde_json::json!("unknown");
+        assert!(state.apply_request_message(&result));
+        assert!(state.busy());
+        result["type"] = serde_json::json!("mutationResult");
+        result["ok"] = serde_json::json!(false);
+        result["code"] = serde_json::json!("REQUEST_CONFLICT");
+        assert!(state.apply_request_message(&result));
+        assert!(state.busy(), "冲突拒绝不代表原请求未执行");
+    }
+
+    #[test]
+    fn 缓存满额明确拒绝后下一次操作切新会话() {
+        let (mut state, token) = waiting_result();
+        let mut result = result_message(token, false);
+        result["code"] = serde_json::json!("REQUEST_CACHE_FULL");
+        assert!(state.apply_request_message(&result));
+        assert!(!state.busy());
+        assert_ne!(state.session_id, "session");
+        assert!(!state.protocol_v2);
+        assert!(state.reserve_send("next".into(), SendPurpose::Mutation).is_some());
     }
 
     #[test]

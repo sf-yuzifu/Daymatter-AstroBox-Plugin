@@ -191,11 +191,14 @@ pub async fn drive_pending_send(token: u64) {
     let session_id = { crate::ui::state::read_state().session_id.clone() };
     let hello = protocol::capabilities(&session_id);
     let _ = interconnect::send_qaic_message(pending.device_addr.clone(), PKG_NAME.to_string(), hello).await;
-    let payload = {
-        let state = write_state();
-        if pending.purpose == SendPurpose::Mutation && state.protocol_v2 && state.capabilities.iter().any(|c| c == "requestId") {
-            protocol::set_request_identity_for(&pending.payload, &pending.request_id, &pending.session_id, &pending.device_id)
-        } else { pending.payload.clone() }
+    let (payload, result_protocol) = {
+        let mut state = write_state();
+        let enabled = pending.purpose == SendPurpose::Mutation && state.protocol_v2
+            && ["requestId", "mutationResult"].iter().all(|required| state.capabilities.iter().any(|c| c == required));
+        if enabled {
+            state.begin_result_wait(&pending);
+            (protocol::set_request_identity_for(&pending.payload, &pending.request_id, &pending.session_id, &pending.device_id), true)
+        } else { (pending.payload.clone(), false) }
     };
     let result =
         interconnect::send_qaic_message(pending.device_addr.clone(), PKG_NAME.to_string(), payload)
@@ -207,29 +210,24 @@ pub async fn drive_pending_send(token: u64) {
         };
         let purpose = completed.purpose;
         if purpose != SendPurpose::Fetch {
-            state.require_confirmation(completed.base_revision);
-            if state.protocol_v2 && purpose == SendPurpose::Mutation {
-                state.result_deadline = Some(token);
-            }
+            if !result_protocol { state.require_confirmation(completed.base_revision); }
         }
         drop(state);
         if purpose == SendPurpose::Fetch {
             // Interconnect accepted the request; completion is the later list response.
             set_status_timed(StatusKind::Info, "请求已发送，等待腕端数据…");
         } else {
-            if read_target_v2() && purpose == SendPurpose::Mutation {
+            if result_protocol {
                 timer::set_timeout(RESULT_TIMEOUT_MS, &format!("{}{}", RESULT_TIMER, token));
                 set_status_timed(StatusKind::Info, "已发送，等待腕端保存确认…");
             } else {
-                set_status_timed(StatusKind::Success, dispatch::SENT_TEXT);
+                set_status_timed(StatusKind::Info, dispatch::SENT_TEXT);
             }
         }
         return;
     }
     fail_attempt(token, pending, dispatch::SEND_FAILED_TEXT).await;
 }
-
-fn read_target_v2() -> bool { crate::ui::state::read_state().protocol_v2 }
 
 async fn fail_attempt(token: u64, pending: PendingSend, message: &str) {
     let attempts = pending.attempts + 1;
@@ -249,7 +247,7 @@ async fn fail_attempt(token: u64, pending: PendingSend, message: &str) {
             return;
         };
         if finished.purpose != SendPurpose::Fetch {
-            state.require_confirmation(finished.base_revision);
+            if state.result_request.is_none() { state.require_confirmation(finished.base_revision); }
         }
     }
     let final_message = if pending.purpose == SendPurpose::Fetch {
@@ -258,6 +256,19 @@ async fn fail_attempt(token: u64, pending: PendingSend, message: &str) {
         "发送结果未确认，请重新获取腕端数据核实；不要直接重复新增"
     };
     set_status_timed(StatusKind::Error, final_message);
+    if read_state().result_deadline == Some(token) {
+        timer::set_timeout(RESULT_TIMEOUT_MS, &format!("{}{}", RESULT_TIMER, token));
+    }
+}
+
+/// 用户刷新时也核实原请求，不重发 mutation。
+pub async fn query_original_result() {
+    let original = read_state().result_request.clone();
+    let Some(original) = original else { return; };
+    let devices = device::get_connected_device_list().await;
+    if !devices.iter().any(|device| device.addr == original.device_id) { return; }
+    let request = protocol::request_status_for(&original.request_id, &original.session_id, &original.device_id);
+    let _ = interconnect::send_qaic_message(original.device_id, PKG_NAME.to_string(), request).await;
 }
 
 /// 删除二次确认：对话框显示名称 + 日期，避免同名误删（E-19）
@@ -298,16 +309,21 @@ pub async fn handle_timer_event(payload: &str) {
             let state = read_state();
             if state.result_deadline != Some(token) { return; }
             if !state.protocol_v2 { return; }
-            protocol::request_status_for(&format!("req-{}", token), &state.session_id,
-                state.target_device.as_deref().unwrap_or(""))
+            let Some(original) = state.result_request.as_ref() else { return; };
+            if state.target_device.as_deref() != Some(original.device_id.as_str()) { return; }
+            protocol::request_status_for(&original.request_id, &original.session_id, &original.device_id)
         };
         let device_addr = read_state().target_device.clone();
         if let Some(device_addr) = device_addr {
+            let render = {
+                let mut state = write_state();
+                if state.result_deadline != Some(token) { return; }
+                state.result_deadline = None;
+                state.status = Some(crate::ui::state::StatusMessage::info("保存结果待核实，已查询原请求；迟到结果仍会接收"));
+                build::prepare_with(&mut state, false)
+            };
+            build::render_prepared(render);
             let _ = interconnect::send_qaic_message(device_addr, PKG_NAME.to_string(), request).await;
-            let mut state = write_state();
-            if state.result_deadline == Some(token) { state.result_deadline = None; }
-            drop(state);
-            set_status_timed(StatusKind::Info, "保存结果待核实，已查询原请求；请刷新腕端数据确认");
         }
     }
 }
