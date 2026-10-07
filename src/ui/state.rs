@@ -197,6 +197,10 @@ pub struct UiState {
     pub result_deadline: Option<u64>,
     /// 独立于 timer 的原请求身份；查询超时后仍接受迟到结果。
     pub result_request: Option<PendingSend>,
+    pub snapshot_device: Option<String>,
+    pub handshake_token: Option<u64>,
+    pub handshake_ready: bool,
+    pub handshake_polls: u32,
 }
 
 impl UiState {
@@ -229,6 +233,10 @@ impl UiState {
             capabilities: Vec::new(),
             result_deadline: None,
             result_request: None,
+            snapshot_device: None,
+            handshake_token: None,
+            handshake_ready: false,
+            handshake_polls: 0,
         }
     }
 
@@ -323,18 +331,73 @@ impl UiState {
     }
 
     pub fn attach_send_device(&mut self, token: u64, device_addr: String) -> bool {
-        if self.target_device.as_deref().is_some_and(|target| target != device_addr) {
-            self.session_id = format!("{}-{}", self.session_id, self.send_sequence);
-        }
-        self.target_device = Some(device_addr.clone());
-        let Some(pending) = self.pending_send.as_mut().filter(|pending| pending.token == token) else {
+        let Some(pending) = self.pending_send.as_ref().filter(|pending| pending.token == token) else {
             return false;
         };
+        if (!pending.device_addr.is_empty() || pending.purpose != SendPurpose::Fetch)
+            && !pending.device_id.is_empty() && pending.device_id != device_addr { return false; }
+        let payload: serde_json::Value = serde_json::from_str(&pending.payload).unwrap_or_default();
+        let from_snapshot = matches!(payload.get("type").and_then(|v| v.as_str()), Some("changeEvent" | "deleteEvent"));
+        if from_snapshot && self.snapshot_device.as_deref() != Some(device_addr.as_str()) { return false; }
+        if self.target_device.as_deref().is_some_and(|target| target != device_addr) {
+            self.session_id = format!("{}-{}", self.session_id, self.send_sequence);
+            self.all_events.clear();
+            self.clear_selection();
+            self.has_fetched_events = false;
+            self.snapshot_device = None;
+            self.revision = None;
+            self.primary_id = None;
+            self.protocol_v2 = false;
+            self.capabilities.clear();
+        }
+        self.target_device = Some(device_addr.clone());
+        let pending = self.pending_send.as_mut().unwrap();
         pending.device_addr = device_addr;
         pending.device_id = self.target_device.clone().unwrap_or_default();
         pending.session_id = self.session_id.clone();
         pending.in_progress = false;
         true
+    }
+
+    pub fn start_handshake(&mut self, token: u64) {
+        self.handshake_token = Some(token);
+        self.handshake_ready = false;
+        self.handshake_polls = 0;
+        self.protocol_v2 = false;
+        self.capabilities.clear();
+    }
+
+    pub fn accept_capabilities(&mut self, value: &serde_json::Value) -> bool {
+        let Some(pending) = self.pending_send.as_ref() else { return false; };
+        if self.handshake_token != Some(pending.token) || self.handshake_ready
+            || value.get("sessionId").and_then(|v| v.as_str()) != Some(pending.session_id.as_str())
+            || self.target_device.as_deref() != Some(pending.device_id.as_str()) { return false; }
+        self.protocol_v2 = value.get("protocolVersion").and_then(|v| v.as_u64()).unwrap_or(0) >= 2;
+        self.capabilities = value.get("capabilities").and_then(|v| v.as_array()).map(|items|
+            items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect()).unwrap_or_default();
+        self.handshake_ready = true;
+        true
+    }
+
+    pub fn supports(&self, capability: &str) -> bool {
+        self.protocol_v2 && self.handshake_ready && self.capabilities.iter().any(|item| item == capability)
+    }
+
+    pub fn poll_handshake(&mut self, token: u64, max_polls: u32) -> bool {
+        if self.handshake_token != Some(token) { return false; }
+        if !self.handshake_ready && self.handshake_polls < max_polls {
+            self.handshake_polls += 1;
+            let attempts = self.pending_send.as_ref().map(|item| item.attempts).unwrap_or(0);
+            self.retry_send(token, attempts);
+            true
+        } else {
+            if !self.handshake_ready {
+                self.handshake_ready = true;
+                self.protocol_v2 = false;
+                self.capabilities.clear();
+            }
+            false
+        }
     }
 
     /// 定时器 token 只能领取一次；重复/过期 timer 不会重复发送。
@@ -360,10 +423,12 @@ impl UiState {
         if self.pending_send.as_ref().map(|pending| pending.token) != Some(token) {
             return None;
         }
+        if self.handshake_token == Some(token) { self.handshake_token = None; }
         self.pending_send.take()
     }
 
     pub fn apply_confirmed_list(&mut self, primary_id: Option<String>, revision: Option<u64>) {
+        self.snapshot_device = self.target_device.clone();
         if self.pending_send.as_ref().is_some_and(|pending| pending.purpose == SendPurpose::Fetch) {
             // The list can arrive before the send-transport callback. Consume
             // the fetch token here so its later timer completion is harmless.
@@ -549,6 +614,76 @@ mod tests {
         let pending = state.claim_send(token).unwrap();
         state.begin_result_wait(&pending);
         (state, token)
+    }
+
+    #[test]
+    fn 操作预约后不允许重绑到其他设备_旧列表不能用于新设备() {
+        let mut state = state_with_events();
+        state.target_device = Some("a".into());
+        state.snapshot_device = Some("a".into());
+        let token = state.reserve_send(r#"{"type":"deleteEvent","id":"e1"}"#.into(), SendPurpose::Mutation).unwrap();
+        assert!(!state.attach_send_device(token, "b".into()));
+        assert_eq!(state.target_device.as_deref(), Some("a"));
+        assert_eq!(state.all_events.len(), 3);
+        assert!(state.attach_send_device(token, "a".into()));
+        assert!(!state.attach_send_device(token, "b".into()));
+        state.finish_send(token);
+        state.target_device = Some("b".into());
+        let token = state.reserve_send(r#"{"type":"changeEvent","id":"e1"}"#.into(), SendPurpose::Mutation).unwrap();
+        assert!(!state.attach_send_device(token, "b".into()), "快照属于 a，不能在 b 操作");
+    }
+
+    #[test]
+    fn 首次握手等待后按逐项能力启用_旧会话与迟到回包不覆盖() {
+        let (mut state, token) = waiting_result();
+        state.start_handshake(token);
+        assert!(!state.supports("requestId"));
+        assert!(state.poll_handshake(token, 8));
+        let mut capabilities = serde_json::json!({"sessionId":"stale", "protocolVersion":2,
+            "capabilities":["requestId", "stableId"]});
+        assert!(!state.accept_capabilities(&capabilities));
+        capabilities["sessionId"] = serde_json::json!("session");
+        assert!(state.accept_capabilities(&capabilities));
+        assert!(!state.poll_handshake(token, 8));
+        assert!(state.supports("requestId"));
+        assert!(state.supports("stableId"));
+        assert!(!state.supports("mutationResult"), "单项能力不能推断其他能力");
+        capabilities["capabilities"] = serde_json::json!(["mutationResult"]);
+        assert!(!state.accept_capabilities(&capabilities));
+        assert!(!state.supports("mutationResult"));
+    }
+
+    #[test]
+    fn 握手超时有界降级且迟到能力不改变本次发送模式() {
+        let (mut state, token) = waiting_result();
+        state.start_handshake(token);
+        for _ in 0..8 { assert!(state.poll_handshake(token, 8)); }
+        assert!(!state.poll_handshake(token, 8));
+        assert_eq!(state.handshake_polls, 8);
+        assert!(!state.protocol_v2);
+        assert!(!state.accept_capabilities(&serde_json::json!({"sessionId":"session", "protocolVersion":2,
+            "capabilities":["requestId", "mutationResult"]})));
+        state.finish_send(token);
+        assert!(!state.poll_handshake(token, 8));
+    }
+
+    #[test]
+    fn 显式刷新可切设备并清空旧快照与能力_已绑定刷新不再重绑() {
+        let mut state = state_with_events();
+        state.target_device = Some("a".into());
+        state.snapshot_device = Some("a".into());
+        state.session_id = "session-a".into();
+        state.revision = Some(9);
+        state.protocol_v2 = true;
+        state.capabilities.push("stableId".into());
+        let token = state.reserve_send(r#"{"type":"getAllEvent"}"#.into(), SendPurpose::Fetch).unwrap();
+        assert!(state.attach_send_device(token, "b".into()));
+        assert!(state.all_events.is_empty());
+        assert!(state.snapshot_device.is_none());
+        assert!(state.revision.is_none());
+        assert!(state.capabilities.is_empty());
+        assert_ne!(state.session_id, "session-a");
+        assert!(!state.attach_send_device(token, "c".into()));
     }
 
     fn result_message(token: u64, ok: bool) -> serde_json::Value {

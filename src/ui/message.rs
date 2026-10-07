@@ -19,6 +19,8 @@ pub const MAX_SEND_ATTEMPTS: u32 = 3;
 pub const RETRY_INTERVAL_MS: u64 = 800;
 pub const RESULT_TIMEOUT_MS: u64 = 8000;
 pub const RESULT_TIMER: &str = "request_result:";
+pub const HANDSHAKE_POLL_MS: u64 = 250;
+pub const HANDSHAKE_MAX_POLLS: u32 = 8;
 
 /// 状态面板常驻：成功 / 失败不再自动消失，用户可对照腕端核实（P1-51）
 ///
@@ -100,18 +102,11 @@ pub async fn launch_then_send(payload: String, purpose: SendPurpose) -> Result<u
         set_status_timed(StatusKind::Error, "连接设备已变化，请重新同步");
         return Err(SendStartError::Unavailable);
     }
-    {
-        let mut state = write_state();
-        if state.target_device.as_deref().is_some_and(|target| target != device_addr) {
-            state.all_events.clear();
-            state.clear_selection();
-            state.has_fetched_events = false;
-            state.protocol_v2 = false;
-            state.capabilities.clear();
-            state.target_device = Some(device_addr.clone());
-        } else {
-            state.target_device = Some(device_addr.clone());
-        }
+    let bound = write_state().attach_send_device(token, device_addr.clone());
+    if !bound {
+        clear_reservation(token);
+        set_status_timed(StatusKind::Error, "操作目标与当前设备或列表不一致，请重新同步后操作");
+        return Err(SendStartError::Unavailable);
     }
     let Some(app) = find_app(&device_addr).await else {
         clear_reservation(token);
@@ -179,22 +174,54 @@ pub async fn drive_pending_send(token: u64) {
     let Some(pending) = pending else { return };
     let current_devices = device::get_connected_device_list().await;
     if !current_devices.iter().any(|device| device.addr == pending.device_addr) {
-        fail_attempt(token, pending, "目标设备已断开或发生变化，请重新连接后同步").await;
+        clear_reservation(token);
+        set_status_timed(StatusKind::Error, "目标设备已断开，业务消息未发送，请重新连接后同步");
         return;
     }
-    if register::register_interconnect_recv(pending.device_addr.clone(), PKG_NAME.to_string()).await.is_err() {
-        fail_attempt(token, pending, "腕端消息接收器注册失败").await;
+    let needs_handshake = read_state().handshake_token != Some(token);
+    if needs_handshake {
+        if register::register_interconnect_recv(pending.device_addr.clone(), PKG_NAME.to_string()).await.is_err() {
+            clear_reservation(token);
+            set_status_timed(StatusKind::Error, "腕端消息接收器注册失败，业务消息未发送");
+            return;
+        }
+        write_state().start_handshake(token);
+        let hello = protocol::capabilities(&pending.session_id);
+        if interconnect::send_qaic_message(pending.device_addr.clone(), PKG_NAME.to_string(), hello).await.is_err() {
+            clear_reservation(token);
+            set_status_timed(StatusKind::Error, "能力协商发送失败，业务消息未发送");
+            return;
+        }
+    }
+    let waiting = write_state().poll_handshake(token, HANDSHAKE_MAX_POLLS);
+    if waiting {
+        timer::set_timeout(HANDSHAKE_POLL_MS, &format!("{}{}", SEND_TIMER, token));
+        set_status_timed(StatusKind::Info, "正在等待腕端能力确认…");
         return;
     }
-    // Register first, then negotiate. The response is asynchronous; the first command
-    // remains legacy-safe, subsequent mutations use v2 only after capability confirmation.
-    let session_id = { crate::ui::state::read_state().session_id.clone() };
-    let hello = protocol::capabilities(&session_id);
-    let _ = interconnect::send_qaic_message(pending.device_addr.clone(), PKG_NAME.to_string(), hello).await;
+    let current_devices = device::get_connected_device_list().await;
+    let valid = {
+        let state = read_state();
+        state.pending_send.as_ref().is_some_and(|item| item.token == token)
+            && state.target_device.as_deref() == Some(pending.device_id.as_str())
+            && state.session_id == pending.session_id
+            && current_devices.iter().any(|device| device.addr == pending.device_addr)
+    };
+    if !valid {
+        clear_reservation(token);
+        set_status_timed(StatusKind::Error, "握手期间目标发生变化，业务消息未发送");
+        return;
+    }
+    let business: serde_json::Value = serde_json::from_str(&pending.payload).unwrap_or_default();
+    if business.get("id").is_some() && !read_state().supports("stableId") {
+        clear_reservation(token);
+        set_status_timed(StatusKind::Error, "腕端未确认稳定 ID 能力，请更新腕端后重新同步；业务消息未发送");
+        return;
+    }
     let (payload, result_protocol) = {
         let mut state = write_state();
-        let enabled = pending.purpose == SendPurpose::Mutation && state.protocol_v2
-            && ["requestId", "mutationResult"].iter().all(|required| state.capabilities.iter().any(|c| c == required));
+        let enabled = pending.purpose == SendPurpose::Mutation
+            && ["requestId", "mutationResult"].iter().all(|required| state.supports(required));
         if enabled {
             state.begin_result_wait(&pending);
             (protocol::set_request_identity_for(&pending.payload, &pending.request_id, &pending.session_id, &pending.device_id), true)

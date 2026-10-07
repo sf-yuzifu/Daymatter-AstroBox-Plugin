@@ -214,12 +214,7 @@ pub async fn handle_interconnect_message(payload: &str) {
     if let Ok(value) = protocol::decode_message(payload) {
         if value.get("type").and_then(|v| v.as_str()) == Some("capabilities") {
             let mut state = write_state();
-            let session = value.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
-            if session == state.session_id {
-                state.protocol_v2 = value.get("protocolVersion").and_then(|v| v.as_u64()).unwrap_or(0) >= 2;
-                state.capabilities = value.get("capabilities").and_then(|v| v.as_array()).map(|items|
-                    items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect()).unwrap_or_default();
-            }
+            state.accept_capabilities(&value);
             return;
         }
         if matches!(value.get("type").and_then(|v| v.as_str()), Some("mutationResult" | "requestStatus")) {
