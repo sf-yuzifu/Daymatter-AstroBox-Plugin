@@ -2,6 +2,7 @@
 //! 宿主层（渲染 / 事件处理 / 消息 / 图片）只在 wasm32 编译。
 
 pub mod dispatch;
+pub mod backup;
 pub mod protocol;
 pub mod state;
 pub mod theme;

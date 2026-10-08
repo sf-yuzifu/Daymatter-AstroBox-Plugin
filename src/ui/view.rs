@@ -393,6 +393,13 @@ pub fn build(state: &UiState) -> ViewModel {
             });
         }
         (EventType::ModifyEvent, Route::Overview) => {
+            model.cards.push(CardBlock::Note { title:"JSON 备份与恢复", symbol:"info",
+                description:"先同步完整腕端列表，再导出备份或选择 JSON 预览；恢复前确认合并/替换与同 ID 冲突规则。".into() });
+            if !busy {
+                for (id, title) in [(UiId::ExportBackup, "导出完整 JSON 备份"), (UiId::ImportBackup, "选择 JSON 并预览恢复")] {
+                    model.cards.push(CardBlock::Actionable {title:title.into(), description:"使用完整列表，包含归档事件与未知扩展".into(), symbol:"info", event:id.as_str()});
+                }
+            }
             model.cards.push(CardBlock::Note {
                 title: "修改流程",
                 description: "先同步腕端事件，再点事件卡片进入编辑子页；只提交改动的字段".to_string(),
@@ -500,6 +507,25 @@ pub fn build(state: &UiState) -> ViewModel {
             (UiId::FilterCategory, format!("分类：{}", category_label(&state.list_category))),
             (UiId::FilterArchive, if state.list_archived { "已归档" } else { "正常事件" }.into())] {
             model.cards.push(CardBlock::Actionable { title, description: "点击切换".into(), symbol: "calendar", event: id.as_str() });
+        }
+    }
+    if state.current_tab == EventType::ModifyEvent && state.route == Route::Overview {
+        if let Some(preview) = &state.backup_preview {
+            let incoming = preview.backup["data"]["events"].as_array().unwrap().len();
+            model.cards.push(CardBlock::Note {title:"恢复预览", symbol:"info", description:format!(
+                "备份 {} 条；合并后 {} 条。\n同 ID 冲突 {} 条：{}\n同名不同 ID {} 条（分别保留）：{}\n合并保留当前排序和主事件；替换使用备份排序和主事件。",
+                incoming, preview.merged_count, preview.conflicts.len(), preview.conflicts.join("；"), preview.same_names.len(), preview.same_names.join("；"))});
+            if !busy {
+                for (id, title, description) in [
+                    (UiId::BackupMode, if preview.replace {"模式：替换全部"} else {"模式：合并"}, "点击切换；替换会移除备份外的事件"),
+                    (UiId::BackupConflict, if preview.overwrite {"同 ID：使用备份"} else {"同 ID：保留现有"}, "仅合并时生效；同名不同 ID 不覆盖"),
+                    (UiId::CancelBackup, "取消恢复预览", "不写入腕端")
+                ] { model.cards.push(CardBlock::Actionable {title:title.into(), description:description.into(), symbol:"info", event:id.as_str()}); }
+            }
+            model.primary = Some(ActionView {id:UiId::RestoreBackup, label:"确认按预览恢复".into(), kind:ButtonKind::Primary, enabled:!busy});
+            if state.result_request.is_none() && state.legacy_request.is_none() {
+                model.secondary = Some(ActionView {id:UiId::Fetch(FormScope::Modify), label:"重新同步腕端".into(), kind:ButtonKind::AccentQuiet, enabled:!state.sending() && !state.local_file_busy});
+            }
         }
     }
     if matches!(state.route, Route::Editor(FormScope::Modify)) && !busy {

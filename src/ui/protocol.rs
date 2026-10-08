@@ -54,7 +54,7 @@ pub fn new_session_id(sequence: u64) -> String {
 
 pub fn capabilities(session_id: &str) -> String {
     json!({"type":"hello", "protocolVersion":PROTOCOL_VERSION, "sessionId":session_id,
-        "capabilities":["stableId","mutationResult","requestId","listRequestId","listBatches","themeColor","primaryId","primaryMutation","revision","backgroundJpeg","yearlyRepeat","displayUnit","pinned","category","archived","manualOrder","sortMode"]}).to_string()
+        "capabilities":["stableId","mutationResult","requestId","listRequestId","listBatches","themeColor","primaryId","primaryMutation","backupRestore","revision","backgroundJpeg","yearlyRepeat","displayUnit","pinned","category","archived","manualOrder","sortMode"]}).to_string()
 }
 
 pub fn handshake(session_id: &str, token: u64, device_id: &str) -> String {
@@ -279,6 +279,12 @@ pub fn validate_extensions(value: &Value) -> Result<(), &'static str> {
 
 pub fn gate_extensions(value: &mut Value, capabilities: &[String]) -> Result<(), &'static str> {
     validate_extensions(value)?;
+    if value.get("type").and_then(Value::as_str) == Some("restoreBackup") {
+        if !["backupRestore", "stableId", "requestId", "mutationResult"].iter().all(|required| capabilities.iter().any(|c| c == required)) {
+            return Err("腕端未确认备份恢复及保存回执能力，请更新腕端；业务消息未发送");
+        }
+        super::backup::validate(&value["backup"])?;
+    }
     if value.get("type").and_then(Value::as_str) == Some("setPrimary") {
         if !["primaryMutation", "primaryId", "stableId", "requestId", "mutationResult"].iter().all(|required|
             capabilities.iter().any(|c| c == required)) {

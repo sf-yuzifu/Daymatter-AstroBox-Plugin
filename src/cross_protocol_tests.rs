@@ -13,6 +13,51 @@ fn wrist(input: Value) -> Value {
 }
 
 #[test]
+fn backup_merge_replace_integrity_revision_failure_and_large_payload() {
+    use crate::ui::backup;
+    let mut old = EventData::draft("同名😀", "2020-02-29", true, false);
+    old.id = "a".into();
+    let mut incoming = old.clone();
+    incoming.extensions.insert("repeat".into(), json!("yearly"));
+    incoming.extensions.insert("displayUnit".into(), json!("weeks"));
+    incoming.extensions.insert("custom".into(), json!({"😀":1.25,"嵌套":[-0.0, 1e-7, "引号\"\\\n"]}));
+    let mut new = incoming.clone(); new.id = "b".into();
+    let backup = backup::make(&[incoming.clone(), new], "b", "manual").unwrap();
+    let preview = backup::Preview::new(backup.clone(), &[old.clone()], "watch".into(), 10).unwrap();
+    let send = |payload: String, fail: bool| wrist(json!({"events":[backup::event_value(&old)], "failWrites":fail,
+        "messages":[protocol::capabilities("cross-session"), protocol::set_request_identity_for(&payload,"restore","cross-session","watch")]}));
+    let merged = send(preview.payload().unwrap(), false);
+    assert_eq!(merged["store"]["events"].as_array().unwrap().len(), 2);
+    assert!(merged["store"]["events"][0].get("custom").is_none());
+    assert_eq!(merged["store"]["primaryId"], "");
+    assert_eq!(merged["store"]["sortMode"], "created");
+    let mut overwrite = preview.clone(); overwrite.overwrite = true;
+    let merged = send(overwrite.payload().unwrap(), false);
+    assert_eq!(merged["store"]["events"][0]["custom"]["😀"], 1.25);
+    let mut replace = preview.clone(); replace.replace = true;
+    let replaced = send(replace.payload().unwrap(), false);
+    assert_eq!(replaced["store"]["primaryId"], "b");
+    assert_eq!(replaced["store"]["sortMode"], "manual");
+    assert_eq!(replaced["store"]["events"][0]["date"], "2020-02-29");
+    let failed = send(replace.payload().unwrap(), true);
+    assert_eq!(failed["store"]["events"].as_array().unwrap().len(), 1);
+    assert_eq!(failed["store"]["revision"], 10);
+    assert!(failed["messages"].as_array().unwrap().iter().any(|m| m["code"] == "SAVE_FAIL"));
+    let mut stale = replace.clone(); stale.revision = 9;
+    assert!(send(stale.payload().unwrap(), false)["messages"].as_array().unwrap().iter().any(|m| m["code"] == "REVISION_CHANGED"));
+    let mut corrupt: Value = serde_json::from_str(&replace.payload().unwrap()).unwrap();
+    corrupt["backup"]["data"]["events"][0]["name"] = json!("损坏");
+    assert!(send(corrupt.to_string(), false)["messages"].as_array().unwrap().iter().any(|m| m["code"] == "INVALID_BACKUP"));
+    let events: Vec<_> = (0..100).map(|i| {let mut e = incoming.clone(); e.id = format!("big{i}"); e}).collect();
+    let backup = backup::make(&events, "big0", "manual").unwrap();
+    let mut large = backup::Preview::new(backup, &[old.clone()], "watch".into(), 10).unwrap(); large.replace = true;
+    assert!(large.payload().unwrap().len() > 16384);
+    let restored = send(large.payload().unwrap(), false);
+    assert_eq!(restored["store"]["events"].as_array().unwrap().len(), 100);
+    assert!(restored["messages"].as_array().unwrap().iter().any(|m| m["type"] == "mutationResult" && m["ok"] == true));
+}
+
+#[test]
 fn primary_selection_cancel_conflict_archive_and_receipt_roundtrip() {
     let mut state = UiState::new("2026-10-08".into());
     state.session_id = "cross-session".into();

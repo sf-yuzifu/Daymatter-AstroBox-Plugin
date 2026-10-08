@@ -186,6 +186,9 @@ impl Route {
 }
 
 pub struct UiState {
+    pub backup_preview: Option<super::backup::Preview>,
+    pub snapshot_complete: bool,
+    pub local_file_busy: bool,
     pub list_sort: String,
     pub list_category: String,
     pub list_archived: bool,
@@ -237,6 +240,7 @@ pub struct UiState {
 impl UiState {
     pub fn new(today: String) -> Self {
         UiState {
+            backup_preview: None, snapshot_complete: false, local_file_busy: false,
             list_sort: "created".into(), list_category: "all".into(), list_archived: false,
             root_element_id: None,
             current_tab: EventType::AddEvent,
@@ -339,7 +343,7 @@ impl UiState {
 
     /// 正在与腕端交互：锁定重复派发（P1-51）
     pub fn busy(&self) -> bool {
-        self.pending_send.is_some() || self.awaiting_confirmation || self.delete_dialog_open
+        self.pending_send.is_some() || self.awaiting_confirmation || self.delete_dialog_open || self.local_file_busy
     }
 
     pub fn sending(&self) -> bool {
@@ -349,6 +353,7 @@ impl UiState {
     /// 原子预约单飞发送。腕端确认待回读时，只允许拉取列表，不允许重复 mutation。
     pub fn reserve_send(&mut self, payload: String, purpose: SendPurpose) -> Option<u64> {
         if self.pending_send.is_some()
+            || self.local_file_busy
             || self.delete_dialog_open
             || (self.awaiting_confirmation && purpose != SendPurpose::Fetch)
         {
@@ -384,7 +389,7 @@ impl UiState {
         if (!pending.device_addr.is_empty() || pending.purpose != SendPurpose::Fetch)
             && !pending.device_id.is_empty() && pending.device_id != device_addr { return false; }
         let payload: serde_json::Value = serde_json::from_str(&pending.payload).unwrap_or_default();
-        let from_snapshot = matches!(payload.get("type").and_then(|v| v.as_str()), Some("changeEvent" | "deleteEvent" | "moveEvent" | "setPrimary"));
+        let from_snapshot = matches!(payload.get("type").and_then(|v| v.as_str()), Some("changeEvent" | "deleteEvent" | "moveEvent" | "setPrimary" | "restoreBackup"));
         if from_snapshot && self.snapshot_device.as_deref() != Some(device_addr.as_str()) { return false; }
         if from_snapshot && payload.get("index").is_some() && self.snapshot_token.is_none() { return false; }
         if self.target_device.as_deref().is_some_and(|target| target != device_addr) {
@@ -397,6 +402,8 @@ impl UiState {
             self.list_request = None;
             self.revision = None;
             self.primary_id = None;
+            self.snapshot_complete = false;
+            self.backup_preview = None;
             self.protocol_v2 = false;
             self.capabilities.clear();
         }
@@ -580,6 +587,8 @@ impl UiState {
         let minimum = self.revision.into_iter().chain(pending.base_revision).max();
         if matches!((parsed.revision, minimum), (Some(current), Some(base)) if current < base) { return false; }
         let skipped = parsed.skipped;
+        self.snapshot_complete = skipped == 0 && parsed.revision.is_some() && parsed.primary_id.is_some() && parsed.sort_mode.is_some()
+            && parsed.events.iter().all(|e| !e.id.is_empty());
         self.snapshot_token = Some(pending.token);
         self.recovery_snapshot = None;
         if skipped == 0 && self.result_unknown && self.result_request.as_ref().or(self.legacy_request.as_ref()).is_some_and(|original|
@@ -745,6 +754,8 @@ impl UiState {
         let token = request.token;
         let primary_operation = serde_json::from_str::<serde_json::Value>(&request.payload).ok()
             .is_some_and(|payload| payload["type"] == "setPrimary");
+        let restore_operation = serde_json::from_str::<serde_json::Value>(&request.payload).ok()
+            .is_some_and(|payload| payload["type"] == "restoreBackup");
         if primary_operation && ok && (revision.is_none()
             || value.get("primaryId").and_then(|v| v.as_str()).is_none()
             || value.get("primary").and_then(|v| v.get("ok")).and_then(|v| v.as_bool()) != Some(true)
@@ -769,6 +780,8 @@ impl UiState {
         self.awaiting_confirmation = false;
         self.awaiting_revision = None;
         if ok {
+            self.snapshot_complete = false;
+            if restore_operation { self.snapshot_complete = false; self.backup_preview = None; }
             if let Some(primary_id) = value.get("primaryId").and_then(|v| v.as_str()) {
                 if revision.is_some_and(|r| self.revision.is_none_or(|current| r >= current)) {
                     self.primary_id = Some(primary_id.into());
@@ -779,7 +792,11 @@ impl UiState {
                 self.event_page = 0;
             }
             if let Some(revision) = revision { self.revision = Some(self.revision.unwrap_or(0).max(revision)); }
-            self.status = Some(if primary_operation && partial {
+            self.status = Some(if restore_operation && partial {
+                StatusMessage::error("事件恢复已保存，但表盘文件同步失败；请重新同步列表，勿重复恢复")
+            } else if restore_operation {
+                StatusMessage::success("事件恢复已保存，请重新同步腕端列表")
+            } else if primary_operation && partial {
                 StatusMessage::error("表盘主事件已保存，但表盘文件同步失败；稍后打开腕端补写，无需重复设置")
             } else if primary_operation {
                 StatusMessage::success("表盘主事件已保存，表盘文件已同步")
@@ -815,6 +832,29 @@ impl UiState {
             return Err("归档事件不能设为表盘主事件，请先恢复并同步");
         }
         Ok(crate::ui::protocol::set_primary(&event.id, cancel))
+    }
+
+    pub fn export_backup(&self) -> Result<serde_json::Value, &'static str> {
+        if !self.snapshot_complete || self.snapshot_token.is_none() || self.snapshot_device != self.target_device {
+            return Err("请先同步同设备的完整新列表，再导出或预览备份");
+        }
+        super::backup::make(&self.all_events, self.primary_id.as_deref().unwrap_or(""), &self.list_sort)
+    }
+
+    pub fn preview_backup(&mut self, backup: serde_json::Value) -> Result<(), &'static str> {
+        self.export_backup()?;
+        self.backup_preview = Some(super::backup::Preview::new(backup, &self.all_events,
+            self.snapshot_device.clone().unwrap(), self.revision.unwrap())?);
+        Ok(())
+    }
+
+    pub fn restore_payload(&self) -> Result<String, &'static str> {
+        self.export_backup()?;
+        let preview = self.backup_preview.as_ref().ok_or("请先选择备份并预览")?;
+        if self.snapshot_device.as_deref() != Some(preview.device.as_str()) || self.revision != Some(preview.revision) {
+            return Err("设备或数据已变化，请重新选择备份预览");
+        }
+        preview.payload()
     }
 
     pub fn remove_selected(&mut self) -> bool {

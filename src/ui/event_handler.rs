@@ -41,6 +41,15 @@ async fn run_action(action: Action) {
     }
 
     match action {
+        Action::ExportBackup => backup_file(false).await,
+        Action::ImportBackup => backup_file(true).await,
+        Action::RestoreBackup => {
+            let payload = { let state = read_state(); if state.busy() { return; } state.restore_payload() };
+            match payload {
+                Ok(payload) => { let _ = message::launch_then_send(payload, SendPurpose::Mutation).await; }
+                Err(error) => message::set_status(StatusKind::Error, error),
+            }
+        }
         Action::Primary(cancel) => {
             let payload = {
                 let state = read_state();
@@ -80,6 +89,54 @@ async fn run_action(action: Action) {
         Action::RequestDelete => request_delete().await,
         Action::PickBackground => pick_background().await,
         _ => {}
+    }
+}
+
+async fn backup_file(import: bool) {
+    use crate::astrobox::psys_host_v4::dialog;
+    let backup = {
+        let mut state = write_state();
+        if state.busy() { return; }
+        match state.export_backup() {
+            Ok(backup) => { state.local_file_busy = true; state.result_status = None; Ok(backup) }
+            Err(error) => Err(error),
+        }
+    };
+    let backup = match backup { Ok(value) => value, Err(error) => { message::set_status(StatusKind::Error, error); return; } };
+    build::refresh(false);
+    let filter = FilterConfig {multiple:false, extensions:vec!["json".into()], default_directory:String::new(), default_file_name:"daymatter-backup.json".into()};
+    let result: Result<(), String> = if import {
+        match pick_file(PickConfig {read:true, copy_to:None}, filter).await {
+            Ok(file) => {
+                if file.data.len() > super::backup::MAX_BYTES { Err("备份超过 240 KiB 预算".into()) }
+                else {
+                    match serde_json::from_slice(&file.data) {
+                        Ok(value) => write_state().preview_backup(value).map_err(str::to_owned),
+                        Err(_) => Err("备份不是合法 UTF-8 JSON".into()),
+                    }
+                }
+            }
+            Err(error) => Err(format!("选择备份未完成：{error}")),
+        }
+    } else {
+        match dialog::save_file_start(filter).await {
+            Ok(session) => {
+                let bytes = serde_json::to_vec(&backup).unwrap();
+                let mut result = Ok(());
+                for chunk in bytes.chunks(16 * 1024) {
+                    if let Err(error) = dialog::save_file_write_chunk(session.session_id, chunk.to_vec()).await { result = Err(error); break; }
+                }
+                if result.is_ok() { result = dialog::save_file_finish(session.session_id).await; }
+                if result.is_err() { dialog::save_file_abort(session.session_id).await; }
+                result
+            }
+            Err(error) => Err(format!("保存备份未完成：{error}")),
+        }
+    };
+    write_state().local_file_busy = false;
+    match result {
+        Ok(()) => message::set_status(StatusKind::Success, if import {"备份已校验，请查看预览并确认恢复规则"} else {"完整 JSON 备份已保存"}),
+        Err(error) => message::set_status(StatusKind::Error, &error),
     }
 }
 

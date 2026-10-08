@@ -131,10 +131,17 @@ pub enum UiId {
     FilterArchive,
     SetPrimary,
     CancelPrimary,
+    ExportBackup,
+    ImportBackup,
+    BackupMode,
+    BackupConflict,
+    RestoreBackup,
+    CancelBackup,
 }
 
 impl UiId {
-    pub const ALL: [UiId; 62] = [
+    pub const ALL: [UiId; 68] = [
+        UiId::ExportBackup, UiId::ImportBackup, UiId::BackupMode, UiId::BackupConflict, UiId::RestoreBackup, UiId::CancelBackup,
         UiId::SetPrimary, UiId::CancelPrimary,
         UiId::MoveUp, UiId::MoveDown, UiId::SortMode, UiId::FilterCategory, UiId::FilterArchive,
         UiId::Field(FormScope::Add, FieldRole::Pinned), UiId::Field(FormScope::Modify, FieldRole::Pinned),
@@ -208,6 +215,12 @@ impl UiId {
             UiId::FilterArchive => "action.list.archive".into(),
             UiId::SetPrimary => "action.modify.primary.set".into(),
             UiId::CancelPrimary => "action.modify.primary.cancel".into(),
+            UiId::ExportBackup => "action.backup.export".into(),
+            UiId::ImportBackup => "action.backup.import".into(),
+            UiId::BackupMode => "action.backup.mode".into(),
+            UiId::BackupConflict => "action.backup.conflict".into(),
+            UiId::RestoreBackup => "action.backup.restore".into(),
+            UiId::CancelBackup => "action.backup.cancel".into(),
         }
     }
 
@@ -247,6 +260,12 @@ pub fn parse_pick(id: &str) -> Option<(FormScope, String)> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    ExportBackup,
+    ImportBackup,
+    BackupMode,
+    BackupConflict,
+    RestoreBackup,
+    CancelBackup,
     Primary(bool),
     MoveEvent(&'static str),
     SortMode,
@@ -305,6 +324,12 @@ pub fn resolve(id: &str, kind: UiEventKind, payload: &str) -> Option<Action> {
     let ui_id = UiId::parse(id)?;
     let click = kind == UiEventKind::Click;
     Some(match ui_id {
+        UiId::ExportBackup if click => Action::ExportBackup,
+        UiId::ImportBackup if click => Action::ImportBackup,
+        UiId::BackupMode if click => Action::BackupMode,
+        UiId::BackupConflict if click => Action::BackupConflict,
+        UiId::RestoreBackup if click => Action::RestoreBackup,
+        UiId::CancelBackup if click => Action::CancelBackup,
         UiId::SetPrimary if click => Action::Primary(false),
         UiId::CancelPrimary if click => Action::Primary(true),
         UiId::MoveUp if click => Action::MoveEvent("up"),
@@ -351,12 +376,17 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
     if state.busy()
         && matches!(
             action,
-            Action::SubmitAdd | Action::SubmitModify | Action::RequestDelete | Action::PickBackground | Action::MoveEvent(_) | Action::SortMode | Action::Primary(_)
+            Action::SubmitAdd | Action::SubmitModify | Action::RequestDelete | Action::PickBackground | Action::MoveEvent(_) | Action::SortMode | Action::Primary(_) |
+            Action::ExportBackup | Action::ImportBackup | Action::RestoreBackup | Action::BackupMode | Action::BackupConflict | Action::CancelBackup
         )
     {
         return StateChange { action, rebuild: false, status: None };
     }
     match action.clone() {
+        Action::ExportBackup | Action::ImportBackup | Action::RestoreBackup => { rebuild = false; }
+        Action::BackupMode => { if let Some(preview) = state.backup_preview.as_mut() { preview.replace = !preview.replace; } }
+        Action::BackupConflict => { if let Some(preview) = state.backup_preview.as_mut() { preview.overwrite = !preview.overwrite; } }
+        Action::CancelBackup => { state.backup_preview = None; }
         Action::Primary(_) => { rebuild = false; }
         Action::MoveEvent(_) => { rebuild = false; }
         Action::SortMode => {
