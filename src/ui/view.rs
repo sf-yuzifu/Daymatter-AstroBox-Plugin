@@ -413,6 +413,20 @@ pub fn build(state: &UiState) -> ViewModel {
             });
         }
         (EventType::ModifyEvent, Route::Editor(scope)) => {
+            let current = state.selected_event_key.as_deref().and_then(|key| state.index_of_key(key))
+                .and_then(|index| state.all_events.get(index));
+            let is_primary = current.is_some_and(|event| !event.id.is_empty() && state.primary_id.as_deref() == Some(event.id.as_str()));
+            model.cards.push(CardBlock::Note { title: "表盘主事件", symbol: "watch",
+                description: if is_primary { "当前事件是表盘主事件。取消后清空表盘，不自动指定其他事件。" }
+                else { "当前事件不是表盘主事件。设置会替换原主事件，与首页展示、置顶无关。" }.into() });
+            if !busy && current.is_some_and(|event| !event.id.is_empty()
+                && (is_primary || event.extensions.get("archived").and_then(|v| v.as_bool()) != Some(true))) {
+                model.cards.push(CardBlock::Actionable {
+                    title: if is_primary { "取消表盘主事件" } else { "设为表盘主事件" }.into(),
+                    description: "仅操作已保存事件，不提交编辑草稿；以腕端最终回执确认".into(), symbol: "watch",
+                    event: if is_primary { UiId::CancelPrimary } else { UiId::SetPrimary }.as_str(),
+                });
+            }
             let label = selected_label(state);
             model.header = Some(HeaderView {
                 title: "修改事件",
@@ -519,7 +533,7 @@ pub fn should_render(state: &mut UiState, force: bool) -> Option<ViewModel> {
 
 /// 预留字段说明文案（F-01 / F-02 / F-03 落地时替换成真实控件）
 pub fn reserved_note() -> String {
-    "置顶、分类与归档需腕端确认对应能力；表盘主事件插件入口后续接入".into()
+    "置顶、分类与归档需腕端确认对应能力；表盘主事件请在修改页单独指定".into()
 }
 
 fn category_label(key: &str) -> &'static str {
@@ -530,6 +544,57 @@ fn category_label(key: &str) -> &'static str {
 mod select_tests {
     use super::*;
     use crate::ui::dispatch::{resolve, apply_action, UiEventKind};
+
+    #[test]
+    fn primary_entry_tracks_confirmed_id_and_hides_while_busy_or_archived() {
+        let mut state = UiState::new("2026-10-08".into());
+        state.current_tab = EventType::ModifyEvent;
+        state.all_events.push(crate::ui::state::EventData {id:"e1".into(), ..Default::default()});
+        state.open_editor("id:e1");
+        let has = |state: &UiState, id: UiId| build(state).bound_ids().contains(&id.as_str());
+        assert!(has(&state, UiId::SetPrimary));
+        state.primary_id = Some("e1".into());
+        assert!(has(&state, UiId::CancelPrimary));
+        state.awaiting_confirmation = true;
+        assert!(!has(&state, UiId::CancelPrimary));
+        state.awaiting_confirmation = false;
+        state.primary_id = Some("".into());
+        state.all_events[0].extensions.insert("archived".into(), serde_json::json!(true));
+        assert!(!has(&state, UiId::SetPrimary));
+        assert!(state.primary_payload(false).is_err());
+    }
+
+    #[test]
+    fn primary_receipt_requires_final_metadata_and_preserves_draft_on_failure() {
+        for (ok, watchface_ok, code) in [(true, false, "WATCHFACE_FAIL"), (false, false, "WRITE_FAIL")] {
+            let mut state = UiState::new("2026-10-08".into());
+            state.target_device = Some("watch".into());
+            state.snapshot_device = Some("watch".into());
+            state.primary_id = Some("old".into());
+            state.all_events.push(crate::ui::state::EventData {id:"e1".into(), ..Default::default()});
+            state.open_editor("id:e1");
+            state.modify_event_data.name = "草稿".into();
+            let token = state.reserve_send(state.primary_payload(false).unwrap(), crate::ui::state::SendPurpose::Mutation).unwrap();
+            state.attach_send_device(token, "watch".into());
+            let pending = state.claim_send(token).unwrap();
+            state.begin_result_wait(&pending);
+            let mut result = serde_json::json!({"type":"mutationResult", "requestId":pending.request_id,
+                "sessionId":pending.session_id,"deviceId":"watch", "ok":ok, "code":code});
+            if ok {
+                assert!(!state.apply_request_message(&result));
+                assert!(state.busy());
+                result["revision"] = serde_json::json!(11);
+                result["primaryId"] = serde_json::json!("e1");
+                result["primary"] = serde_json::json!({"ok":true});
+                result["watchface"] = serde_json::json!({"ok":watchface_ok});
+            }
+            assert!(state.apply_request_message(&result));
+            assert!(!state.busy());
+            assert_eq!(state.primary_id.as_deref(), Some(if ok {"e1"} else {"old"}));
+            assert_eq!(state.modify_event_data.name, "草稿");
+            assert_eq!(state.result_status.as_ref().unwrap().kind, StatusKind::Error);
+        }
+    }
 
     #[test]
     fn 单位分类中文选择回填协议值且重绘保留选中项() {

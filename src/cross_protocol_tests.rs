@@ -13,6 +13,49 @@ fn wrist(input: Value) -> Value {
 }
 
 #[test]
+fn primary_selection_cancel_conflict_archive_and_receipt_roundtrip() {
+    let mut state = UiState::new("2026-10-08".into());
+    state.session_id = "cross-session".into();
+    state.target_device = Some("watch".into());
+    state.snapshot_device = Some("watch".into());
+    state.all_events = vec![EventData { id:"b".into(), name:"乙".into(), time:"2026-12-01".into(), ..Default::default() }];
+    state.select_event("id:b");
+    state.modify_event_data.name = "未提交草稿".into();
+    let payload = state.primary_payload(false).unwrap();
+    let token = state.reserve_send(payload.clone(), SendPurpose::Mutation).unwrap();
+    assert!(state.attach_send_device(token, "watch".into()));
+    let pending = state.claim_send(token).unwrap();
+    state.begin_result_wait(&pending);
+    let tagged = protocol::set_request_identity_for(&payload, &pending.request_id, &pending.session_id, &pending.device_id);
+    let output = wrist(json!({"events":[
+        {"id":"a", "name":"甲", "date":"2026-12-01", "on_index":true, "pinned":true},
+        {"id":"b", "name":"乙", "date":"2026-12-01", "on_index":false},
+        {"id":"c", "name":"归档", "date":"2026-12-01", "archived":true}
+    ], "messages":[protocol::capabilities("cross-session"), tagged.clone(), tagged,
+        protocol::request_status_for(&pending.request_id, &pending.session_id, &pending.device_id),
+        protocol::set_request_identity_for(&protocol::set_primary("a", true), "stale", "cross-session", "watch"),
+        protocol::set_request_identity_for(&protocol::set_primary("c", false), "archived", "cross-session", "watch")]}));
+    let messages = output["messages"].as_array().unwrap();
+    let result = messages.iter().find(|m| m["requestId"] == pending.request_id && m["type"] == "mutationResult").unwrap();
+    assert_eq!(result["primaryId"], "b");
+    assert_eq!(result["primary"]["ok"], true);
+    assert_eq!(result["watchface"]["ok"], true);
+    assert!(state.apply_request_message(result));
+    assert_eq!(state.primary_id.as_deref(), Some("b"));
+    assert_eq!(state.modify_event_data.name, "未提交草稿");
+    assert!(!state.busy());
+    assert_eq!(output["store"]["revision"], result["revision"]);
+    assert_eq!(output["store"]["primaryId"], "b");
+    assert_eq!(output["store"]["events"][1]["name"], "乙");
+    assert!(messages.iter().any(|m| m["requestId"] == "stale" && m["code"] == "PRIMARY_CHANGED"));
+    assert!(messages.iter().any(|m| m["requestId"] == "archived" && m["code"] == "ARCHIVED_PRIMARY"));
+    let cancelled = wrist(json!({"events":output["store"]["events"], "messages":[protocol::capabilities("cross-session"),
+        protocol::set_primary("b", false),
+        protocol::set_request_identity_for(&state.primary_payload(true).unwrap(), "cancel", "cross-session", "watch")]}));
+    assert_eq!(cancelled["store"]["primaryId"], "");
+}
+
+#[test]
 fn sorting_archive_fields_move_receipt_and_old_patch_roundtrip() {
     let mut a = EventData::draft("生日", "2020-02-29", true, false);
     a.extensions.insert("pinned".into(), json!(true));

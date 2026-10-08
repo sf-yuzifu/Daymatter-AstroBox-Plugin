@@ -129,10 +129,13 @@ pub enum UiId {
     SortMode,
     FilterCategory,
     FilterArchive,
+    SetPrimary,
+    CancelPrimary,
 }
 
 impl UiId {
-    pub const ALL: [UiId; 60] = [
+    pub const ALL: [UiId; 62] = [
+        UiId::SetPrimary, UiId::CancelPrimary,
         UiId::MoveUp, UiId::MoveDown, UiId::SortMode, UiId::FilterCategory, UiId::FilterArchive,
         UiId::Field(FormScope::Add, FieldRole::Pinned), UiId::Field(FormScope::Modify, FieldRole::Pinned),
         UiId::Field(FormScope::Add, FieldRole::Archived), UiId::Field(FormScope::Modify, FieldRole::Archived),
@@ -203,6 +206,8 @@ impl UiId {
             UiId::SortMode => "action.list.sort".into(),
             UiId::FilterCategory => "action.list.category".into(),
             UiId::FilterArchive => "action.list.archive".into(),
+            UiId::SetPrimary => "action.modify.primary.set".into(),
+            UiId::CancelPrimary => "action.modify.primary.cancel".into(),
         }
     }
 
@@ -242,6 +247,7 @@ pub fn parse_pick(id: &str) -> Option<(FormScope, String)> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    Primary(bool),
     MoveEvent(&'static str),
     SortMode,
     FilterCategory,
@@ -299,6 +305,8 @@ pub fn resolve(id: &str, kind: UiEventKind, payload: &str) -> Option<Action> {
     let ui_id = UiId::parse(id)?;
     let click = kind == UiEventKind::Click;
     Some(match ui_id {
+        UiId::SetPrimary if click => Action::Primary(false),
+        UiId::CancelPrimary if click => Action::Primary(true),
         UiId::MoveUp if click => Action::MoveEvent("up"),
         UiId::MoveDown if click => Action::MoveEvent("down"),
         UiId::SortMode if click => Action::SortMode,
@@ -343,12 +351,13 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
     if state.busy()
         && matches!(
             action,
-            Action::SubmitAdd | Action::SubmitModify | Action::RequestDelete | Action::PickBackground | Action::MoveEvent(_) | Action::SortMode
+            Action::SubmitAdd | Action::SubmitModify | Action::RequestDelete | Action::PickBackground | Action::MoveEvent(_) | Action::SortMode | Action::Primary(_)
         )
     {
         return StateChange { action, rebuild: false, status: None };
     }
     match action.clone() {
+        Action::Primary(_) => { rebuild = false; }
         Action::MoveEvent(_) => { rebuild = false; }
         Action::SortMode => {
             rebuild = false;

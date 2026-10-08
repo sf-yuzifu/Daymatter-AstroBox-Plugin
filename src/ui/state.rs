@@ -384,7 +384,7 @@ impl UiState {
         if (!pending.device_addr.is_empty() || pending.purpose != SendPurpose::Fetch)
             && !pending.device_id.is_empty() && pending.device_id != device_addr { return false; }
         let payload: serde_json::Value = serde_json::from_str(&pending.payload).unwrap_or_default();
-        let from_snapshot = matches!(payload.get("type").and_then(|v| v.as_str()), Some("changeEvent" | "deleteEvent" | "moveEvent"));
+        let from_snapshot = matches!(payload.get("type").and_then(|v| v.as_str()), Some("changeEvent" | "deleteEvent" | "moveEvent" | "setPrimary"));
         if from_snapshot && self.snapshot_device.as_deref() != Some(device_addr.as_str()) { return false; }
         if from_snapshot && payload.get("index").is_some() && self.snapshot_token.is_none() { return false; }
         if self.target_device.as_deref().is_some_and(|target| target != device_addr) {
@@ -743,6 +743,14 @@ impl UiState {
             return false;
         }
         let token = request.token;
+        let primary_operation = serde_json::from_str::<serde_json::Value>(&request.payload).ok()
+            .is_some_and(|payload| payload["type"] == "setPrimary");
+        if primary_operation && ok && (revision.is_none()
+            || value.get("primaryId").and_then(|v| v.as_str()).is_none()
+            || value.get("primary").and_then(|v| v.get("ok")).and_then(|v| v.as_bool()) != Some(true)
+            || value.get("watchface").and_then(|v| v.get("ok")).and_then(|v| v.as_bool()).is_none()) {
+            return false;
+        }
         let code = value.get("code").and_then(|v| v.as_str()).unwrap_or("");
         if !ok && code == "REQUEST_CONFLICT" {
             self.status = Some(StatusMessage::error("请求身份冲突，原请求可能仍在保存；请查询原结果，不要重复新增"));
@@ -761,12 +769,21 @@ impl UiState {
         self.awaiting_confirmation = false;
         self.awaiting_revision = None;
         if ok {
+            if let Some(primary_id) = value.get("primaryId").and_then(|v| v.as_str()) {
+                if revision.is_some_and(|r| self.revision.is_none_or(|current| r >= current)) {
+                    self.primary_id = Some(primary_id.into());
+                }
+            }
             if let Some(mode) = value.get("sortMode").and_then(|v| v.as_str()).filter(|s| ["created", "near", "manual"].contains(s)) {
                 self.list_sort = mode.into();
                 self.event_page = 0;
             }
             if let Some(revision) = revision { self.revision = Some(self.revision.unwrap_or(0).max(revision)); }
-            self.status = Some(if partial {
+            self.status = Some(if primary_operation && partial {
+                StatusMessage::error("表盘主事件已保存，但表盘文件同步失败；稍后打开腕端补写，无需重复设置")
+            } else if primary_operation {
+                StatusMessage::success("表盘主事件已保存，表盘文件已同步")
+            } else if partial {
                 StatusMessage::error("事件已保存，但主事件或表盘同步失败；请核实分项结果，不要重复新增")
             } else { StatusMessage::success("腕端已保存") });
         } else {
@@ -786,6 +803,18 @@ impl UiState {
         self.selected_event_key = None;
         self.pending_delete_key = None;
         self.modify_event_data = EventData::default();
+    }
+
+    pub fn primary_payload(&self, cancel: bool) -> Result<String, &'static str> {
+        let event = self.selected_event_key.as_deref().and_then(|key| self.index_of_key(key))
+            .and_then(|index| self.all_events.get(index)).ok_or("请先同步并选择事件")?;
+        if event.id.is_empty() { return Err("表盘主事件需要稳定 ID，请更新腕端并同步"); }
+        if cancel {
+            if self.primary_id.as_deref() != Some(event.id.as_str()) { return Err("该事件不是当前表盘主事件，请重新同步核对"); }
+        } else if event.extensions.get("archived").and_then(|v| v.as_bool()) == Some(true) {
+            return Err("归档事件不能设为表盘主事件，请先恢复并同步");
+        }
+        Ok(crate::ui::protocol::set_primary(&event.id, cancel))
     }
 
     pub fn remove_selected(&mut self) -> bool {

@@ -41,6 +41,17 @@ async fn run_action(action: Action) {
     }
 
     match action {
+        Action::Primary(cancel) => {
+            let payload = {
+                let state = read_state();
+                if state.busy() { return; }
+                state.primary_payload(cancel)
+            };
+            match payload {
+                Ok(payload) => { let _ = message::launch_then_send(payload, SendPurpose::Mutation).await; }
+                Err(error) => message::set_status(StatusKind::Error, error),
+            }
+        }
         Action::MoveEvent(direction) => {
             let key = read_state().selected_event_key.clone();
             if let Some(id) = key.as_deref().and_then(|k| k.strip_prefix("id:")) {
