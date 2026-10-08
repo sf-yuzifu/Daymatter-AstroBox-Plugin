@@ -137,10 +137,14 @@ pub enum UiId {
     BackupConflict,
     RestoreBackup,
     CancelBackup,
+    TemplateBirthday,
+    TemplateExam,
+    TemplateAnniversary,
 }
 
 impl UiId {
-    pub const ALL: [UiId; 68] = [
+    pub const ALL: [UiId; 71] = [
+        UiId::TemplateBirthday, UiId::TemplateExam, UiId::TemplateAnniversary,
         UiId::ExportBackup, UiId::ImportBackup, UiId::BackupMode, UiId::BackupConflict, UiId::RestoreBackup, UiId::CancelBackup,
         UiId::SetPrimary, UiId::CancelPrimary,
         UiId::MoveUp, UiId::MoveDown, UiId::SortMode, UiId::FilterCategory, UiId::FilterArchive,
@@ -221,6 +225,9 @@ impl UiId {
             UiId::BackupConflict => "action.backup.conflict".into(),
             UiId::RestoreBackup => "action.backup.restore".into(),
             UiId::CancelBackup => "action.backup.cancel".into(),
+            UiId::TemplateBirthday => "action.template.birthday".into(),
+            UiId::TemplateExam => "action.template.exam".into(),
+            UiId::TemplateAnniversary => "action.template.anniversary".into(),
         }
     }
 
@@ -260,6 +267,7 @@ pub fn parse_pick(id: &str) -> Option<(FormScope, String)> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    Template(&'static str),
     ExportBackup,
     ImportBackup,
     BackupMode,
@@ -324,6 +332,9 @@ pub fn resolve(id: &str, kind: UiEventKind, payload: &str) -> Option<Action> {
     let ui_id = UiId::parse(id)?;
     let click = kind == UiEventKind::Click;
     Some(match ui_id {
+        UiId::TemplateBirthday if click => Action::Template("birthday"),
+        UiId::TemplateExam if click => Action::Template("exam"),
+        UiId::TemplateAnniversary if click => Action::Template("anniversary"),
         UiId::ExportBackup if click => Action::ExportBackup,
         UiId::ImportBackup if click => Action::ImportBackup,
         UiId::BackupMode if click => Action::BackupMode,
@@ -377,12 +388,30 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
         && matches!(
             action,
             Action::SubmitAdd | Action::SubmitModify | Action::RequestDelete | Action::PickBackground | Action::MoveEvent(_) | Action::SortMode | Action::Primary(_) |
-            Action::ExportBackup | Action::ImportBackup | Action::RestoreBackup | Action::BackupMode | Action::BackupConflict | Action::CancelBackup
+            Action::ExportBackup | Action::ImportBackup | Action::RestoreBackup | Action::BackupMode | Action::BackupConflict | Action::CancelBackup | Action::Template(_)
         )
     {
         return StateChange { action, rebuild: false, status: None };
     }
     match action.clone() {
+        Action::Template(kind) => {
+            if state.current_tab != crate::ui::state::EventType::AddEvent { rebuild = false; }
+            else {
+                let (name, category, repeat) = match kind {
+                    "birthday" => ("生日", "birthday", "yearly"),
+                    "exam" => ("考试", "study", "none"),
+                    _ => ("纪念日", "anniversary", "yearly"),
+                };
+                if state.event_data.name.is_empty() || ["生日", "考试", "纪念日"].contains(&state.event_data.name.as_str()) {
+                    state.event_data.name = name.into();
+                }
+                if state.event_data.time.is_empty() { state.event_data.time = state.today.clone(); }
+                state.event_data.extensions.insert("category".into(), serde_json::json!(category));
+                state.event_data.extensions.insert("repeat".into(), serde_json::json!(repeat));
+                state.event_data.extensions.insert("displayUnit".into(), serde_json::json!("days"));
+                status = Some(StatusMessage::info("模板已应用到草稿，请核对名称与日期后发送"));
+            }
+        }
         Action::ExportBackup | Action::ImportBackup | Action::RestoreBackup => { rebuild = false; }
         Action::BackupMode => { if let Some(preview) = state.backup_preview.as_mut() { preview.replace = !preview.replace; } }
         Action::BackupConflict => { if let Some(preview) = state.backup_preview.as_mut() { preview.overwrite = !preview.overwrite; } }
@@ -398,7 +427,14 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
             state.list_category = categories[(i + 1) % categories.len()].into();
             state.event_page = 0;
         }
-        Action::FilterArchive => { state.list_archived = !state.list_archived; state.event_page = 0; }
+        Action::FilterArchive => {
+            let scopes = ["all", "archived", "today", "upcoming"];
+            let current = if state.list_archived { "archived" } else { &state.list_period };
+            let next = scopes[(scopes.iter().position(|s| *s == current).unwrap_or(0) + 1) % scopes.len()];
+            state.list_archived = next == "archived";
+            state.list_period = if next == "archived" { "all" } else { next }.into();
+            state.event_page = 0;
+        }
         Action::FinishUnknown => { rebuild = state.finish_unknown_after_review(); }
         Action::SwitchSegment(tab) => {
             if state.current_tab == tab && !state.route.is_editor() {

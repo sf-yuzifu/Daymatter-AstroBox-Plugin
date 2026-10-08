@@ -192,6 +192,7 @@ pub struct UiState {
     pub list_sort: String,
     pub list_category: String,
     pub list_archived: bool,
+    pub list_period: String,
     pub root_element_id: Option<String>,
     pub current_tab: EventType,
     pub route: Route,
@@ -242,6 +243,7 @@ impl UiState {
         UiState {
             backup_preview: None, snapshot_complete: false, local_file_busy: false,
             list_sort: "created".into(), list_category: "all".into(), list_archived: false,
+            list_period: "all".into(),
             root_element_id: None,
             current_tab: EventType::AddEvent,
             route: Route::Overview,
@@ -883,6 +885,7 @@ impl UiState {
     pub fn filtered_events(&self) -> Vec<(usize, &EventData)> {
         let mut events: Vec<_> = self.all_events.iter().enumerate().filter(|(_, e)| {
             e.extensions.get("archived").and_then(|v| v.as_bool()).unwrap_or(false) == self.list_archived &&
+            (self.list_period == "all" || (!self.list_archived && self.period_matches(e))) &&
             (self.list_category == "all" || e.extensions.get("category").and_then(|v| v.as_str()).unwrap_or("uncategorized") == self.list_category)
         }).collect();
         events.sort_by_key(|(index, e)| {
@@ -897,6 +900,14 @@ impl UiState {
                 if self.list_sort == "near" { near as i64 } else if self.list_sort == "manual" { order as i64 } else { *index as i64 }, *index)
         });
         events
+    }
+
+    fn period_matches(&self, event: &EventData) -> bool {
+        let repeat = event.extensions.get("repeat").and_then(|v| v.as_str()).unwrap_or("none");
+        let Some((date, _)) = crate::ui::validation::occurrence(&event.time, repeat, &self.today) else { return false; };
+        let Some(days) = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok().zip(
+            chrono::NaiveDate::parse_from_str(&self.today, "%Y-%m-%d").ok()).map(|(date, today)| (date - today).num_days()) else { return false; };
+        if self.list_period == "today" { days == 0 } else { (0..=30).contains(&days) }
     }
 
     pub fn page_events(&self) -> Vec<(usize, &EventData)> {

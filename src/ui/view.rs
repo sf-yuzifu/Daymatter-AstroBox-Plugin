@@ -374,6 +374,11 @@ pub fn build(state: &UiState) -> ViewModel {
 
     match (state.current_tab, state.route) {
         (EventType::AddEvent, _) => {
+            if !busy {
+                for (id, title) in [(UiId::TemplateBirthday, "生日模板"), (UiId::TemplateExam, "考试模板"), (UiId::TemplateAnniversary, "纪念日模板")] {
+                    model.cards.push(CardBlock::Actionable {title:title.into(), description:"设置分类、重复和天数单位；空名称或模板默认名称随模板切换，保留自定义名称与日期".into(), symbol:"calendar", event:id.as_str()});
+                }
+            }
             model.cards.push(CardBlock::Note {
                 title: "新建事件",
                 description: "填写名称与目标日期，设置显示选项后发送到腕端；表盘事件请在修改页单独指定".to_string(),
@@ -505,7 +510,7 @@ pub fn build(state: &UiState) -> ViewModel {
         let sort_label = match state.list_sort.as_str() { "near" => "临近日期", "manual" => "手动顺序", _ => "创建顺序" };
         for (id, title) in [(UiId::SortMode, format!("排序：{}（同步腕端）", sort_label)),
             (UiId::FilterCategory, format!("分类：{}", category_label(&state.list_category))),
-            (UiId::FilterArchive, if state.list_archived { "已归档" } else { "正常事件" }.into())] {
+            (UiId::FilterArchive, if state.list_archived { "已归档" } else if state.list_period == "today" { "今天事项" } else if state.list_period == "upcoming" { "未来30天（含今天）" } else { "正常事件" }.into())] {
             model.cards.push(CardBlock::Actionable { title, description: "点击切换".into(), symbol: "calendar", event: id.as_str() });
         }
     }
@@ -570,6 +575,31 @@ fn category_label(key: &str) -> &'static str {
 mod select_tests {
     use super::*;
     use crate::ui::dispatch::{resolve, apply_action, UiEventKind};
+
+    #[test]
+    fn templates_keep_user_name_date_and_recent_uses_occurrence_boundaries() {
+        let mut state = UiState::new("2026-02-28".into());
+        state.event_data.name = "用户名称".into();
+        state.event_data.time = "2000-02-29".into();
+        apply_action(&mut state, crate::ui::dispatch::Action::Template("birthday"));
+        assert_eq!(state.event_data.name,"用户名称");
+        assert_eq!(state.event_data.time,"2000-02-29");
+        assert_eq!(state.event_data.extensions["repeat"],"yearly");
+        apply_action(&mut state, crate::ui::dispatch::Action::Template("exam"));
+        assert_eq!(state.event_data.extensions["category"],"study");
+        assert_eq!(state.event_data.extensions["repeat"],"none");
+        for (id,date,repeat,archived) in [("leap","2020-02-29","yearly",false),("today","2026-02-28","none",false),
+            ("edge","2026-03-30","none",false),("outside","2026-03-31","none",false),("past","2026-02-27","none",false),
+            ("archived","2026-02-28","none",true)] {
+            let mut event = crate::ui::state::EventData::draft(id,date,true,true);
+            event.id = id.into(); event.extensions.insert("repeat".into(),serde_json::json!(repeat));
+            event.extensions.insert("archived".into(),serde_json::json!(archived)); state.all_events.push(event);
+        }
+        state.list_period = "today".into();
+        assert_eq!(state.filtered_events().iter().map(|(_,e)|e.id.as_str()).collect::<Vec<_>>(),vec!["leap","today"]);
+        state.list_period = "upcoming".into();
+        assert_eq!(state.filtered_events().iter().map(|(_,e)|e.id.as_str()).collect::<Vec<_>>(),vec!["leap","today","edge"]);
+    }
 
     #[test]
     fn primary_entry_tracks_confirmed_id_and_hides_while_busy_or_archived() {
