@@ -186,6 +186,9 @@ impl Route {
 }
 
 pub struct UiState {
+    pub list_sort: String,
+    pub list_category: String,
+    pub list_archived: bool,
     pub root_element_id: Option<String>,
     pub current_tab: EventType,
     pub route: Route,
@@ -234,6 +237,7 @@ pub struct UiState {
 impl UiState {
     pub fn new(today: String) -> Self {
         UiState {
+            list_sort: "created".into(), list_category: "all".into(), list_archived: false,
             root_element_id: None,
             current_tab: EventType::AddEvent,
             route: Route::Overview,
@@ -380,7 +384,7 @@ impl UiState {
         if (!pending.device_addr.is_empty() || pending.purpose != SendPurpose::Fetch)
             && !pending.device_id.is_empty() && pending.device_id != device_addr { return false; }
         let payload: serde_json::Value = serde_json::from_str(&pending.payload).unwrap_or_default();
-        let from_snapshot = matches!(payload.get("type").and_then(|v| v.as_str()), Some("changeEvent" | "deleteEvent"));
+        let from_snapshot = matches!(payload.get("type").and_then(|v| v.as_str()), Some("changeEvent" | "deleteEvent" | "moveEvent"));
         if from_snapshot && self.snapshot_device.as_deref() != Some(device_addr.as_str()) { return false; }
         if from_snapshot && payload.get("index").is_some() && self.snapshot_token.is_none() { return false; }
         if self.target_device.as_deref().is_some_and(|target| target != device_addr) {
@@ -587,6 +591,7 @@ impl UiState {
         let selected_before = self.selected_event_key.as_deref().and_then(|key|
             self.index_of_key(key).and_then(|index| self.all_events.get(index))).cloned();
         self.all_events = parsed.events;
+        if let Some(mode) = parsed.sort_mode { self.list_sort = mode; }
         self.has_fetched_events = true;
         self.apply_confirmed_list(parsed.primary_id, parsed.revision);
         self.event_page = self.event_page.min(self.max_page().saturating_sub(1));
@@ -756,6 +761,10 @@ impl UiState {
         self.awaiting_confirmation = false;
         self.awaiting_revision = None;
         if ok {
+            if let Some(mode) = value.get("sortMode").and_then(|v| v.as_str()).filter(|s| ["created", "near", "manual"].contains(s)) {
+                self.list_sort = mode.into();
+                self.event_page = 0;
+            }
             if let Some(revision) = revision { self.revision = Some(self.revision.unwrap_or(0).max(revision)); }
             self.status = Some(if partial {
                 StatusMessage::error("事件已保存，但主事件或表盘同步失败；请核实分项结果，不要重复新增")
@@ -794,22 +803,38 @@ impl UiState {
     }
 
     pub fn max_page(&self) -> usize {
-        if self.all_events.is_empty() {
-            1
-        } else {
-            self.all_events.len().div_ceil(crate::ui::theme::EVENT_PAGE_SIZE)
-        }
+        self.filtered_events().len().div_ceil(crate::ui::theme::EVENT_PAGE_SIZE).max(1)
+    }
+
+    /// 返回独立值，调用方释放读锁后才能进入发送/渲染路径。
+    pub fn next_sort_mode(&self) -> String {
+        match self.list_sort.as_str() { "created" => "near", "near" => "manual", _ => "created" }.into()
+    }
+
+    pub fn filtered_events(&self) -> Vec<(usize, &EventData)> {
+        let mut events: Vec<_> = self.all_events.iter().enumerate().filter(|(_, e)| {
+            e.extensions.get("archived").and_then(|v| v.as_bool()).unwrap_or(false) == self.list_archived &&
+            (self.list_category == "all" || e.extensions.get("category").and_then(|v| v.as_str()).unwrap_or("uncategorized") == self.list_category)
+        }).collect();
+        events.sort_by_key(|(index, e)| {
+            let pin = !e.extensions.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false);
+            let order = e.extensions.get("sortOrder").and_then(|v| v.as_u64()).unwrap_or(*index as u64);
+            let occurrence = crate::ui::validation::occurrence(&e.time, e.extensions.get("repeat").and_then(|v| v.as_str()).unwrap_or("none"), &self.today);
+            let date = occurrence.map(|(d, _)| d).unwrap_or_else(|| e.time.clone());
+            let past = date < self.today;
+            let day = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok().map(|d| d.num_days_from_ce()).unwrap_or(i32::MAX);
+            let near = if past { -day } else { day };
+            (pin, if self.list_sort == "near" { past } else { false },
+                if self.list_sort == "near" { near as i64 } else if self.list_sort == "manual" { order as i64 } else { *index as i64 }, *index)
+        });
+        events
     }
 
     pub fn page_events(&self) -> Vec<(usize, &EventData)> {
         let size = crate::ui::theme::EVENT_PAGE_SIZE;
         let page = self.event_page.min(self.max_page().saturating_sub(1));
         let start = page * size;
-        let end = (start + size).min(self.all_events.len());
-        if start >= end {
-            return Vec::new();
-        }
-        self.all_events[start..end].iter().enumerate().map(|(offset, event)| (start + offset, event)).collect()
+        self.filtered_events().into_iter().skip(start).take(size).collect()
     }
 }
 
@@ -848,7 +873,47 @@ fn today_from_offset(offset_minutes: i32) -> String {
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
-
+    #[test]
+    fn 排序取值后释放读锁才可预约发送() {
+        let lock = std::sync::RwLock::new(super::UiState::new("2026-10-08".into()));
+        for (current, next) in [("created", "near"), ("near", "manual"), ("manual", "created")] {
+            lock.write().unwrap().list_sort = current.into();
+            let mode = {
+                let state = lock.read().unwrap();
+                state.next_sort_mode()
+            };
+            let mut state = lock.try_write().expect("排序取值后不能保留读锁");
+            assert_eq!(mode, next);
+            assert!(state.reserve_send(serde_json::json!({"type":"setSortMode", "sortMode":mode}).to_string(), super::SendPurpose::Mutation).is_some());
+            state.pending_send = None;
+        }
+    }
+    #[test]
+    fn 排序筛选有界分页保留原始身份且年度按下次日期() {
+        let mut state = super::UiState::new("2026-10-08".into());
+        for (id, date, repeat, pinned, archived, category) in [
+            ("old", "2026-09-01", "none", false, false, "life"),
+            ("future", "2026-10-10", "none", false, false, "birthday"),
+            ("today", "2026-10-08", "none", false, false, "birthday"),
+            ("annual", "2020-10-09", "yearly", false, false, "birthday"),
+            ("pin", "2026-01-01", "none", true, false, "life"),
+            ("archive", "2026-10-08", "none", false, true, "life"),
+        ] {
+            let mut event = super::EventData::draft(id, date, true, true);
+            event.id = id.into();
+            event.extensions = serde_json::from_value(serde_json::json!({"repeat":repeat,"pinned":pinned,"archived":archived,"category":category})).unwrap();
+            state.all_events.push(event);
+        }
+        state.list_sort = "near".into();
+        assert_eq!(state.page_events().iter().map(|(_, e)| e.id.as_str()).collect::<Vec<_>>(), ["pin", "today", "annual", "future", "old"]);
+        state.list_category = "birthday".into();
+        assert_eq!(state.page_events()[0].0, 2);
+        assert!(state.open_editor("id:today"));
+        assert_eq!(state.modify_event_data.id, "today");
+        state.list_category = "all".into();
+        state.list_archived = true;
+        assert_eq!(state.page_events()[0].1.id, "archive");
+    }
     use super::*;
 
     fn state_with_events() -> UiState {

@@ -41,6 +41,21 @@ async fn run_action(action: Action) {
     }
 
     match action {
+        Action::MoveEvent(direction) => {
+            let key = read_state().selected_event_key.clone();
+            if let Some(id) = key.as_deref().and_then(|k| k.strip_prefix("id:")) {
+                let payload = serde_json::json!({"type":"moveEvent", "id":id, "direction":direction}).to_string();
+                let _ = message::launch_then_send(payload, SendPurpose::Mutation).await;
+            } else { message::set_status(StatusKind::Error, "移动需要稳定 ID，请更新腕端并同步"); }
+        }
+        Action::SortMode => {
+            // 不从临时 RwLockReadGuard 借值到发送作用域；发送入口立即获取写锁。
+            let mode = {
+                let state = read_state();
+                state.next_sort_mode()
+            };
+            let _ = message::launch_then_send(serde_json::json!({"type":"setSortMode", "sortMode":mode}).to_string(), SendPurpose::Mutation).await;
+        }
         Action::SubmitAdd => submit_add().await,
         Action::SubmitModify => submit_modify().await,
         Action::FetchEvents => {
@@ -62,6 +77,7 @@ fn draft_of(scope: FormScope) -> EventData {
 }
 
 fn validate_draft(draft: &EventData, previous: Option<&str>) -> Option<String> {
+    if let Err(error) = protocol::validate_extensions(&serde_json::json!(draft.extensions)) { return Some(error.into()); }
     for (field, allowed) in [("repeat", &["none", "yearly"][..]), ("displayUnit", &["days", "weeks", "months", "years"][..])] {
         if let Some(value) = draft.extensions.get(field) {
             if !value.as_str().is_some_and(|text| allowed.contains(&text)) { return Some("重复规则或显示单位无效，请按提示选择".into()); }

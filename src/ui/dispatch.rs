@@ -14,6 +14,9 @@ pub enum FieldRole {
     CountStartDay,
     Repeat,
     Unit,
+    Pinned,
+    Archived,
+    Category,
 }
 
 impl FieldRole {
@@ -25,6 +28,9 @@ impl FieldRole {
             FieldRole::CountStartDay => "count_start",
             FieldRole::Repeat => "repeat",
             FieldRole::Unit => "unit",
+            FieldRole::Pinned => "pinned",
+            FieldRole::Archived => "archived",
+            FieldRole::Category => "category",
         }
     }
 
@@ -36,6 +42,9 @@ impl FieldRole {
             FieldRole::CountStartDay => "计入起始日",
             FieldRole::Repeat => "每年重复",
             FieldRole::Unit => "显示单位",
+            FieldRole::Pinned => "置顶",
+            FieldRole::Archived => "归档",
+            FieldRole::Category => "分类",
         }
     }
 
@@ -46,11 +55,15 @@ impl FieldRole {
             FieldRole::OnHome => "只影响快应用首页卡片，与表盘无关",
             FieldRole::CountStartDay => "开启后目标日本身算第 1 天",
             FieldRole::Repeat => "保留原日期；非闰年2月29日按2月28日发生",
-            FieldRole::Unit => "days / weeks / months / years（天 / 周 / 月 / 年）",
+            FieldRole::Unit => "选择天、周、月或年；不足所选单位时按天显示",
+            FieldRole::Pinned => "置顶组优先，不改变表盘主事件",
+            FieldRole::Archived => "首页隐藏，可恢复；归档主事件自动替代",
+            FieldRole::Category => "选择事件所属分类，可在事件列表按分类筛选",
         }
     }
 
-    pub const ALL: [FieldRole; 6] = [
+    pub const ALL: [FieldRole; 9] = [
+        FieldRole::Pinned, FieldRole::Archived, FieldRole::Category,
         FieldRole::Repeat,
         FieldRole::Unit,
         FieldRole::Name,
@@ -111,10 +124,23 @@ pub enum UiId {
     StatusDismiss,
     BackOverview,
     FinishUnknown,
+    MoveUp,
+    MoveDown,
+    SortMode,
+    FilterCategory,
+    FilterArchive,
 }
 
 impl UiId {
-    pub const ALL: [UiId; 41] = [
+    pub const ALL: [UiId; 60] = [
+        UiId::MoveUp, UiId::MoveDown, UiId::SortMode, UiId::FilterCategory, UiId::FilterArchive,
+        UiId::Field(FormScope::Add, FieldRole::Pinned), UiId::Field(FormScope::Modify, FieldRole::Pinned),
+        UiId::Field(FormScope::Add, FieldRole::Archived), UiId::Field(FormScope::Modify, FieldRole::Archived),
+        UiId::Field(FormScope::Add, FieldRole::Category), UiId::Field(FormScope::Modify, FieldRole::Category),
+        UiId::SwitchOn(FormScope::Add, FieldRole::Pinned), UiId::SwitchOff(FormScope::Add, FieldRole::Pinned),
+        UiId::SwitchOn(FormScope::Modify, FieldRole::Pinned), UiId::SwitchOff(FormScope::Modify, FieldRole::Pinned),
+        UiId::SwitchOn(FormScope::Add, FieldRole::Archived), UiId::SwitchOff(FormScope::Add, FieldRole::Archived),
+        UiId::SwitchOn(FormScope::Modify, FieldRole::Archived), UiId::SwitchOff(FormScope::Modify, FieldRole::Archived),
         UiId::Field(FormScope::Add, FieldRole::Repeat),
         UiId::Field(FormScope::Modify, FieldRole::Repeat),
         UiId::Field(FormScope::Add, FieldRole::Unit),
@@ -172,6 +198,11 @@ impl UiId {
             UiId::BackOverview => "nav.back".to_string(),
             UiId::StatusDismiss => "status.dismiss".to_string(),
             UiId::FinishUnknown => "action.result.reviewed".to_string(),
+            UiId::MoveUp => "action.modify.move.up".into(),
+            UiId::MoveDown => "action.modify.move.down".into(),
+            UiId::SortMode => "action.list.sort".into(),
+            UiId::FilterCategory => "action.list.category".into(),
+            UiId::FilterArchive => "action.list.archive".into(),
         }
     }
 
@@ -211,6 +242,10 @@ pub fn parse_pick(id: &str) -> Option<(FormScope, String)> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    MoveEvent(&'static str),
+    SortMode,
+    FilterCategory,
+    FilterArchive,
     SwitchSegment(EventType),
     BackOverview,
     SetText { scope: FormScope, role: FieldRole, value: String },
@@ -264,6 +299,11 @@ pub fn resolve(id: &str, kind: UiEventKind, payload: &str) -> Option<Action> {
     let ui_id = UiId::parse(id)?;
     let click = kind == UiEventKind::Click;
     Some(match ui_id {
+        UiId::MoveUp if click => Action::MoveEvent("up"),
+        UiId::MoveDown if click => Action::MoveEvent("down"),
+        UiId::SortMode if click => Action::SortMode,
+        UiId::FilterCategory if click => Action::FilterCategory,
+        UiId::FilterArchive if click => Action::FilterArchive,
         UiId::Segment(tab) if click => Action::SwitchSegment(tab),
         UiId::BackOverview if click => Action::BackOverview,
         UiId::Field(scope, role) if !click => Action::SetText {
@@ -303,12 +343,23 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
     if state.busy()
         && matches!(
             action,
-            Action::SubmitAdd | Action::SubmitModify | Action::RequestDelete | Action::PickBackground
+            Action::SubmitAdd | Action::SubmitModify | Action::RequestDelete | Action::PickBackground | Action::MoveEvent(_) | Action::SortMode
         )
     {
         return StateChange { action, rebuild: false, status: None };
     }
     match action.clone() {
+        Action::MoveEvent(_) => { rebuild = false; }
+        Action::SortMode => {
+            rebuild = false;
+        }
+        Action::FilterCategory => {
+            let categories = ["all", "uncategorized", "birthday", "study", "life", "anniversary"];
+            let i = categories.iter().position(|c| *c == state.list_category).unwrap_or(0);
+            state.list_category = categories[(i + 1) % categories.len()].into();
+            state.event_page = 0;
+        }
+        Action::FilterArchive => { state.list_archived = !state.list_archived; state.event_page = 0; }
         Action::FinishUnknown => { rebuild = state.finish_unknown_after_review(); }
         Action::SwitchSegment(tab) => {
             if state.current_tab == tab && !state.route.is_editor() {
@@ -331,6 +382,7 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
                     FieldRole::Name => draft.name = value,
                     FieldRole::Date => draft.time = value,
                     FieldRole::Unit => { draft.extensions.insert("displayUnit".into(), serde_json::json!(value)); }
+                    FieldRole::Category => { draft.extensions.insert("category".into(), serde_json::json!(value)); }
                     _ => {}
                 }
             }
@@ -343,6 +395,8 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
                     FieldRole::OnHome => draft.on_index = on,
                     FieldRole::CountStartDay => draft.if_staring_day = on,
                     FieldRole::Repeat => { draft.extensions.insert("repeat".into(), serde_json::json!(if on { "yearly" } else { "none" })); }
+                    FieldRole::Pinned => { draft.extensions.insert("pinned".into(), serde_json::json!(on)); }
+                    FieldRole::Archived => { draft.extensions.insert("archived".into(), serde_json::json!(on)); }
                     _ => {}
                 }
             }
@@ -596,7 +650,7 @@ mod tests {
     #[test]
     fn 预留字段尚未接入绑定() {
         for role in ReservedRole::ALL {
-            if role == ReservedRole::Repeat { continue; }
+            if role == ReservedRole::Repeat || role == ReservedRole::Pinned { continue; }
             for scope in [FormScope::Add, FormScope::Modify] {
                 let id = format!("field.{}.{}", scope.as_str(), role.as_str());
                 assert!(UiId::parse(&id).is_none(), "{} 尚未实现，不应有绑定", id);

@@ -12,6 +12,33 @@ fn wrist(input: Value) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+#[test]
+fn sorting_archive_fields_move_receipt_and_old_patch_roundtrip() {
+    let mut a = EventData::draft("生日", "2020-02-29", true, false);
+    a.extensions.insert("pinned".into(), json!(true));
+    a.extensions.insert("category".into(), json!("birthday"));
+    a.extensions.insert("archived".into(), json!(true));
+    let output = wrist(json!({"events":[
+        {"id":"a", "name":"甲", "date":"2026-12-01", "on_index":true},
+        {"id":"b", "name":"乙", "date":"2026-12-01", "on_index":true}
+    ], "messages":[protocol::capabilities("cross-session"), protocol::add_event(&a),
+        protocol::set_request_identity_for(&json!({"type":"moveEvent", "id":"b", "direction":"up"}).to_string(), "move", "cross-session", "watch"),
+        json!({"type":"changeEvent", "index":2, "name":"旧端改名"}).to_string(), protocol::get_all_events()]}));
+    assert_eq!(output["store"]["sortMode"], "manual");
+    assert_eq!(output["store"]["events"][1]["sortOrder"], 0);
+    let result = output["messages"].as_array().unwrap().iter().find(|m| m["requestId"] == "move" && m["type"] == "mutationResult").unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["sortMode"], "manual");
+    let list = output["messages"].as_array().unwrap().iter().find(|m| m.get("data").is_some()).unwrap();
+    let parsed = protocol::parse_event_list(&list.to_string()).unwrap();
+    assert_eq!(parsed.sort_mode.as_deref(), Some("manual"));
+    let event = &parsed.events[2];
+    assert_eq!(event.extensions["pinned"], true);
+    assert_eq!(event.extensions["archived"], true);
+    assert_eq!(event.extensions["category"], "birthday");
+    assert_eq!(event.name, "旧端改名");
+}
+
 fn request(purpose: SendPurpose) -> (UiState, String) {
     let mut state = UiState::new("2026-10-07".into());
     state.session_id = "cross-session".into();

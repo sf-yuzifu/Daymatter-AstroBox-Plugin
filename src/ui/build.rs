@@ -61,6 +61,9 @@ fn field(field: &FieldView) -> ui::Element {
         FieldView::Text { id, value, label, hint } => {
             w::field_block(label, w::input(value, hint, &id.as_str()), hint)
         }
+        FieldView::Select { id, value, options, label, hint } => {
+            w::field_block(label, w::select(value, options, &id.as_str()), hint)
+        }
         FieldView::Switch { on_id, off_id, on, label, hint } => w::field_block(
             label,
             w::switch_pair("是", "否", &on_id.as_str(), &off_id.as_str(), *on),

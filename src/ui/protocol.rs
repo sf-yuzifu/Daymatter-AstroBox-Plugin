@@ -43,17 +43,18 @@ pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 pub const MAX_LIST_EVENTS: usize = 200;
 
 pub fn new_session_id(sequence: u64) -> String {
-    // WASI pid 可能恒定，必须包含每次启动的时间身份。
+    // WASI 不支持 std::process::id()，调用会 panic。使用时间 + 运行内 nonce，
+    // 保持会话关联唯一性；该值不是认证或密码学随机身份。
     use std::sync::atomic::{AtomicU64, Ordering};
     static NONCE: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos()).unwrap_or(0);
-    format!("abp-{}-{}-{}-{}", std::process::id(), nanos, NONCE.fetch_add(1, Ordering::Relaxed), sequence)
+    format!("abp-{}-{}-{}", nanos, NONCE.fetch_add(1, Ordering::Relaxed), sequence)
 }
 
 pub fn capabilities(session_id: &str) -> String {
     json!({"type":"hello", "protocolVersion":PROTOCOL_VERSION, "sessionId":session_id,
-        "capabilities":["stableId","mutationResult","requestId","listRequestId","listBatches","themeColor","primaryId","revision","backgroundJpeg","yearlyRepeat","displayUnit"]}).to_string()
+        "capabilities":["stableId","mutationResult","requestId","listRequestId","listBatches","themeColor","primaryId","revision","backgroundJpeg","yearlyRepeat","displayUnit","pinned","category","archived","manualOrder","sortMode"]}).to_string()
 }
 
 pub fn handshake(session_id: &str, token: u64, device_id: &str) -> String {
@@ -99,7 +100,7 @@ pub fn add_event(draft: &EventData) -> String {
 }
 
 fn editable_extensions(payload: &mut Value, draft: &EventData) {
-    for field in ["repeat", "displayUnit"] {
+    for field in ["repeat", "displayUnit", "pinned", "archived", "category"] {
         if let Some(value) = draft.extensions.get(field) { payload[field] = value.clone(); }
     }
 }
@@ -155,6 +156,7 @@ pub fn decode_message(payload: &str) -> Result<Value, ParseIssue> {
 /// 解析腕端事件列表：兼容 `payloadText` 包裹；单条异常只跳过该条并计数
 #[derive(Debug, PartialEq)]
 pub struct ParsedEvents {
+    pub sort_mode: Option<String>,
     pub events: Vec<EventData>,
     pub skipped: usize,
     pub primary_id: Option<String>,
@@ -221,11 +223,13 @@ pub fn parse_event_list(payload: &str) -> Result<ParsedEvents, ParseIssue> {
     let request_id = metadata.get("requestId").and_then(Value::as_str).map(str::to_owned);
     let session_id = metadata.get("sessionId").and_then(Value::as_str).map(str::to_owned);
     let device_id = metadata.get("deviceId").and_then(Value::as_str).map(str::to_owned);
-    Ok(ParsedEvents { events, skipped, primary_id, revision, request_id, session_id, device_id })
+    let sort_mode = metadata.get("sortMode").map(|v| v.as_str().filter(|s| ["created", "near", "manual"].contains(s)).map(str::to_owned).ok_or(ParseIssue::InvalidMetadata)).transpose()?;
+    Ok(ParsedEvents { events, skipped, primary_id, revision, request_id, session_id, device_id, sort_mode })
 }
 
 fn parse_event(item: &Value, index: usize) -> Option<EventData> {
     let object = item.as_object()?;
+    if validate_extensions(item).is_err() { return None; }
     let name = object.get("name")?.as_str()?.to_string();
     let time = object.get("date")?.as_str()?.to_string();
     // 保留旧长名称，不静默截断；单字段仍有接收预算。
@@ -259,6 +263,35 @@ fn optional_text(value: Option<&Value>, max: usize) -> Option<String> {
     }
 }
 
+pub fn validate_extensions(value: &Value) -> Result<(), &'static str> {
+    for field in ["pinned", "archived"] {
+        if value.get(field).is_some_and(|v| !v.is_boolean()) { return Err("置顶/归档字段必须为布尔值"); }
+    }
+    if value.get("category").is_some_and(|v| !v.as_str().is_some_and(|s| ["uncategorized", "birthday", "study", "life", "anniversary"].contains(&s))) { return Err("分类无效"); }
+    if value.get("sortOrder").is_some_and(|v| !v.as_u64().is_some_and(|n| n <= 9_007_199_254_740_991)) { return Err("手动顺序无效"); }
+    Ok(())
+}
+
+pub fn gate_extensions(value: &mut Value, capabilities: &[String]) -> Result<(), &'static str> {
+    validate_extensions(value)?;
+    for (field, capability, default) in [
+        ("pinned", "pinned", json!(false)), ("archived", "archived", json!(false)),
+        ("category", "category", json!("uncategorized")),
+    ] {
+        if let Some(v) = value.get(field) {
+            if !capabilities.iter().any(|c| c == capability) {
+                if v != &default { return Err("腕端未确认置顶/分类/归档能力，请更新腕端；业务消息未发送"); }
+                value.as_object_mut().unwrap().remove(field);
+            }
+        }
+    }
+    let required = match value.get("type").and_then(Value::as_str) {
+        Some("moveEvent") => Some("manualOrder"), Some("setSortMode") => Some("sortMode"), _ => None,
+    };
+    if required.is_some_and(|r| !capabilities.iter().any(|c| c == r)) { return Err("腕端未确认排序能力，请更新腕端；业务消息未发送"); }
+    Ok(())
+}
+
 fn checked_bool(value: Option<&Value>) -> Option<bool> {
     match value {
         Some(Value::Bool(flag)) => Some(*flag),
@@ -273,6 +306,21 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+
+    #[test]
+    fn 新字段逐项门控及校验不推断其他能力() {
+        let mut defaults = json!({"type":"addEvent", "pinned":false, "archived":false, "category":"uncategorized"});
+        gate_extensions(&mut defaults, &[]).unwrap();
+        assert!(defaults.get("pinned").is_none());
+        for mut value in [json!({"pinned":true}), json!({"archived":true}), json!({"category":"birthday"}), json!({"type":"moveEvent"}), json!({"type":"setSortMode"})] {
+            assert!(gate_extensions(&mut value, &[]).is_err());
+        }
+        let mut value = json!({"pinned":true, "category":"birthday"});
+        assert!(gate_extensions(&mut value, &["pinned".into()]).is_err());
+        for value in [json!({"archived":1}), json!({"category":"other"}), json!({"sortOrder":-1}), json!({"sortOrder":9007199254740992u64})] {
+            assert!(validate_extensions(&value).is_err());
+        }
+    }
 
     #[test]
     fn 会话身份同进程同序号也不重复() {

@@ -282,6 +282,28 @@ pub fn field_block(label: &str, control: ui::Element, tip: &str) -> ui::Element 
 }
 
 /// 开关：两枚药丸按钮互斥高亮
+pub fn select(value: &str, options: &[(&str, &str)], event: &str) -> ui::Element {
+    let mut element = ui::Element::new(ui::ElementType::Select, None)
+        .prop("value", value)
+        .on(ui::Event::Change, event)
+        .width_full()
+        .min_width(0)
+        .min_height(theme::ROW_HEIGHT)
+        .bg(theme::CONTROL)
+        .text_color(theme::TEXT)
+        .radius(12)
+        .padding_left(16)
+        .padding_right(16);
+    for (key, label) in options {
+        let mut option = ui::Element::new(ui::ElementType::Option, Some(label))
+            .prop("value", key);
+        if *key == value { option = option.prop("selected", "true"); }
+        element = element.child(option);
+    }
+    element
+}
+
+/// 开关：两枚药丸按钮互斥高亮
 pub fn switch_pair(on_label: &str, off_label: &str, on_event: &str, off_event: &str, on: bool) -> ui::Element {
     row()
         .gap(theme::GAP_SM)

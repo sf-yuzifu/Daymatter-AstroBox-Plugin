@@ -3,13 +3,14 @@
 //!
 //! 结构与文案都在这里决策，因此可在 host 上断言；界面重建前用指纹比对，内容没变不重画。
 
-use crate::ui::dispatch::{pick_id, FieldRole, ReservedRole, UiId};
+use crate::ui::dispatch::{pick_id, FieldRole, UiId};
 use crate::ui::state::{EventType, FormScope, Route, StatusKind, UiState};
 use crate::ui::theme::ButtonKind;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldView {
     Text { id: UiId, value: String, label: &'static str, hint: &'static str },
+    Select { id: UiId, value: String, options: Vec<(&'static str, &'static str)>, label: &'static str, hint: &'static str },
     Switch { on_id: UiId, off_id: UiId, on: bool, label: &'static str, hint: &'static str },
 }
 
@@ -143,6 +144,7 @@ impl ViewModel {
             for field in &form.fields {
                 match field {
                     FieldView::Text { id, value, .. } => feed(&format!("text:{}:{}", id.as_str(), value)),
+                    FieldView::Select { id, value, options, .. } => feed(&format!("select:{}:{}:{:?}", id.as_str(), value, options)),
                     FieldView::Switch { on_id, off_id, on, .. } => {
                         feed(&format!("switch:{}{}:{}", on_id.as_str(), off_id.as_str(), on))
                     }
@@ -178,7 +180,7 @@ impl ViewModel {
         if let Some(form) = &self.form {
             for field in &form.fields {
                 match field {
-                    FieldView::Text { id, .. } => ids.push(id.as_str()),
+                    FieldView::Text { id, .. } | FieldView::Select { id, .. } => ids.push(id.as_str()),
                     FieldView::Switch { on_id, off_id, .. } => {
                         ids.push(on_id.as_str());
                         ids.push(off_id.as_str());
@@ -197,7 +199,7 @@ fn form_fields(scope: FormScope, state: &UiState) -> Vec<FieldView> {
     let Some(draft) = state.draft(scope) else {
         return Vec::new();
     };
-    vec![
+    let mut fields = vec![
         FieldView::Text {
             id: UiId::Field(scope, FieldRole::Name),
             value: draft.name.clone(),
@@ -230,12 +232,22 @@ fn form_fields(scope: FormScope, state: &UiState) -> Vec<FieldView> {
             on: draft.extensions.get("repeat").and_then(|v| v.as_str()) == Some("yearly"),
             label: FieldRole::Repeat.label(), hint: FieldRole::Repeat.hint(),
         },
-        FieldView::Text {
+        FieldView::Select {
             id: UiId::Field(scope, FieldRole::Unit),
             value: draft.extensions.get("displayUnit").and_then(|v| v.as_str()).unwrap_or("days").to_string(),
+            options: vec![("days", "天"), ("weeks", "周"), ("months", "月"), ("years", "年")],
             label: FieldRole::Unit.label(), hint: FieldRole::Unit.hint(),
         },
-    ]
+    ];
+    for (role, key) in [(FieldRole::Pinned, "pinned"), (FieldRole::Archived, "archived")] {
+        fields.push(FieldView::Switch { on_id: UiId::SwitchOn(scope, role), off_id: UiId::SwitchOff(scope, role),
+            on: draft.extensions.get(key).and_then(|v| v.as_bool()).unwrap_or(false), label: role.label(), hint: role.hint() });
+    }
+    fields.push(FieldView::Select { id: UiId::Field(scope, FieldRole::Category),
+        value: draft.extensions.get("category").and_then(|v| v.as_str()).unwrap_or("uncategorized").into(),
+        options: vec![("uncategorized", "未分类"), ("birthday", "生日"), ("study", "学习"), ("life", "生活"), ("anniversary", "纪念日")],
+        label: FieldRole::Category.label(), hint: FieldRole::Category.hint() });
+    fields
 }
 
 fn event_list(scope: FormScope, state: &UiState) -> EventListView {
@@ -248,6 +260,9 @@ fn event_list(scope: FormScope, state: &UiState) -> EventListView {
         .map(|(index, event)| {
             let key = event.selection_key(index);
             let mut badges = vec![event.time.clone()];
+            if event.extensions.get("pinned").and_then(|v| v.as_bool()) == Some(true) { badges.push("置顶".into()); }
+            if event.extensions.get("archived").and_then(|v| v.as_bool()) == Some(true) { badges.push("已归档".into()); }
+            badges.push(category_label(event.extensions.get("category").and_then(|v| v.as_str()).unwrap_or("uncategorized")).into());
             if event.extensions.get("repeat").and_then(|v| v.as_str()) == Some("yearly") {
                 if let Some((date, Some(years))) = crate::ui::validation::occurrence(&event.time, "yearly", &state.today) {
                     badges.push(format!("下次 {} · 第{}周年", date, years));
@@ -274,7 +289,7 @@ fn event_list(scope: FormScope, state: &UiState) -> EventListView {
             }
         })
         .collect();
-    let total = state.all_events.len();
+    let total = state.filtered_events().len();
     let max_page = state.max_page();
     EventListView {
         scope,
@@ -307,7 +322,7 @@ fn event_list(scope: FormScope, state: &UiState) -> EventListView {
     let page = state.event_page.min(state.max_page().saturating_sub(1));
     let base = format!(
         "共 {} 个事件 · 第 {} / {} 页",
-        state.all_events.len(),
+        state.filtered_events().len(),
         page + 1,
         state.max_page()
     );
@@ -465,6 +480,19 @@ pub fn build(state: &UiState) -> ViewModel {
                 kind: ButtonKind::AccentQuiet, enabled: !state.sending() }
         });
     }
+    if model.list.is_some() {
+        let sort_label = match state.list_sort.as_str() { "near" => "临近日期", "manual" => "手动顺序", _ => "创建顺序" };
+        for (id, title) in [(UiId::SortMode, format!("排序：{}（同步腕端）", sort_label)),
+            (UiId::FilterCategory, format!("分类：{}", category_label(&state.list_category))),
+            (UiId::FilterArchive, if state.list_archived { "已归档" } else { "正常事件" }.into())] {
+            model.cards.push(CardBlock::Actionable { title, description: "点击切换".into(), symbol: "calendar", event: id.as_str() });
+        }
+    }
+    if matches!(state.route, Route::Editor(FormScope::Modify)) && !busy {
+        for (id, title) in [(UiId::MoveUp, "前移"), (UiId::MoveDown, "后移")] {
+            model.cards.push(CardBlock::Actionable { title: title.into(), description: "移动已保存事件，同置顶组/归档状态；草稿先同步修改".into(), symbol: "edit", event: id.as_str() });
+        }
+    }
     model
 }
 
@@ -491,8 +519,41 @@ pub fn should_render(state: &mut UiState, force: bool) -> Option<ViewModel> {
 
 /// 预留字段说明文案（F-01 / F-02 / F-03 落地时替换成真实控件）
 pub fn reserved_note() -> String {
-    let names: Vec<&str> = ReservedRole::ALL.iter().filter(|role| **role != ReservedRole::Repeat).map(|role| role.label()).collect();
-    format!("待支持字段：{}", names.join(" / "))
+    "置顶、分类与归档需腕端确认对应能力；表盘主事件插件入口后续接入".into()
+}
+
+fn category_label(key: &str) -> &'static str {
+    match key { "birthday" => "生日", "study" => "学习", "life" => "生活", "anniversary" => "纪念日", "all" => "全部", _ => "未分类" }
+}
+
+#[cfg(test)]
+mod select_tests {
+    use super::*;
+    use crate::ui::dispatch::{resolve, apply_action, UiEventKind};
+
+    #[test]
+    fn 单位分类中文选择回填协议值且重绘保留选中项() {
+        let mut state = UiState::new("2026-10-08".into());
+        for (role, selected, label) in [(FieldRole::Unit, "weeks", "周"), (FieldRole::Category, "birthday", "生日")] {
+            let id = UiId::Field(FormScope::Add, role).as_str();
+            let action = resolve(&id, UiEventKind::Change, &format!(r#"{{"value":"{}"}}"#, selected)).unwrap();
+            apply_action(&mut state, action);
+            let fields = form_fields(FormScope::Add, &state);
+            let field = fields.iter().find(|f| matches!(f, FieldView::Select {id, ..} if *id == UiId::Field(FormScope::Add, role))).unwrap();
+            match field {
+                FieldView::Select {value, options, ..} => {
+                    assert_eq!(value, selected);
+                    assert!(options.contains(&(selected, label)));
+                }
+                _ => unreachable!(),
+            }
+        }
+        let payload = crate::ui::protocol::add_event(&state.event_data);
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["displayUnit"], "weeks");
+        assert_eq!(value["category"], "birthday");
+        assert!(!build(&state).cards.iter().any(|c| matches!(c, CardBlock::Actionable {event, ..} if event == "action.add.category")));
+    }
 }
 
 /// 分页文案
@@ -578,7 +639,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].id, "pick.modify.id:e1");
         assert_eq!(rows[0].label, "同名");
-        assert_eq!(rows[0].detail, "2026-01-01 · 首页");
+        assert_eq!(rows[0].detail, "2026-01-01 · 未分类 · 首页");
         assert!(rows[0].navigates);
         let action = crate::ui::dispatch::resolve(&rows[0].id, UiEventKind::Click, "").expect("行可点击");
         assert_eq!(action, Action::PickEvent { scope: FormScope::Modify, key: "id:e1".into() });
@@ -602,7 +663,7 @@ mod tests {
         assert_eq!(view.route, Route::Overview);
         assert!(view.primary.as_ref().unwrap().enabled);
         assert!(view.list.as_ref().unwrap().footnote.contains("已选「同名 · 2026-02-02」"));
-        assert_eq!(view.list.as_ref().unwrap().rows[1].detail, "2026-02-02 · 含首日");
+        assert_eq!(view.list.as_ref().unwrap().rows[1].detail, "2026-02-02 · 未分类 · 含首日");
     }
 
     #[test]
@@ -715,7 +776,7 @@ mod tests {
     fn 添加页字段顺序与说明固定() {
         let state = UiState::new("2026-10-06".to_string());
         let fields = form_fields(FormScope::Add, &state);
-        assert_eq!(fields.len(), 6);
+        assert_eq!(fields.len(), 9);
         assert!(matches!(fields[0], FieldView::Text { .. }));
         assert!(matches!(fields[1], FieldView::Text { .. }));
         assert!(matches!(fields[2], FieldView::Switch { on: true, .. }));

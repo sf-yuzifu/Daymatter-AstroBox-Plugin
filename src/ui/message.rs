@@ -225,6 +225,12 @@ pub async fn drive_pending_send(token: u64) {
         return;
     }
     let mut business: serde_json::Value = serde_json::from_str(&pending.payload).unwrap_or_default();
+    let capabilities = read_state().capabilities.clone();
+    if let Err(error) = protocol::gate_extensions(&mut business, &capabilities) {
+        clear_reservation(token);
+        set_status_timed(StatusKind::Error, error);
+        return;
+    }
     for (field, capability, default) in [("repeat", "yearlyRepeat", "none"), ("displayUnit", "displayUnit", "days")] {
         if business.get(field).is_some() && !read_state().supports(capability) {
             if business[field].as_str() != Some(default) {
