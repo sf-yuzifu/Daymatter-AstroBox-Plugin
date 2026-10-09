@@ -13,6 +13,44 @@ fn wrist(input: Value) -> Value {
 }
 
 #[test]
+fn background_sender_actual_wrist_chunks_ack_checksum_and_failure() {
+    use crate::ui::background;
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let mut bytes = vec![1u8; 7000];
+    bytes[..15].copy_from_slice(&[255,216,255,192,0,11,8,1,224,1,80,1,1,17,0]);
+    let mut state = UiState::new("2026-10-09".into());
+    state.session_id = "bg-session".into();
+    state.background_device = Some("watch".into());
+    state.background_bytes = bytes.clone();
+    let begin = json!({"type":"beginBG","bytes":bytes.len(),"checksum":background::checksum(&bytes)}).to_string();
+    let token = state.reserve_send(begin, SendPurpose::Background).unwrap();
+    assert!(state.attach_send_device(token,"watch".into()));
+    let request = state.pending_send.clone().unwrap();
+    state.begin_result_wait(&request);
+    let begin = protocol::set_request_identity_for(&request.payload,&request.request_id,&request.session_id,&request.device_id);
+    state.background_frame = Some(begin.clone());
+    let mut messages = vec![protocol::handshake(&request.session_id,token,"watch"),begin];
+    loop {
+        let output = wrist(json!({"messages":messages,"flushEach":true,"deferWrites":true}));
+        let reply = output["messages"].as_array().unwrap().last().unwrap();
+        if reply["type"] == "mutationResult" {
+            assert_eq!(reply["ok"],true);
+            assert_eq!(STANDARD.decode(output["backgroundData"].as_str().unwrap()).unwrap(),bytes);
+            assert!(state.apply_request_message(reply));
+            assert!(state.background_bytes.is_empty());
+            break;
+        }
+        let next = background::accept_ack(&mut state,reply).expect("actual wrist ACK must advance sender");
+        assert!(next.1.len() < 4600);
+        assert!(background::accept_ack(&mut state,reply).is_none(),"duplicate ACK ignored");
+        messages.push(next.1);
+    }
+    let failed = wrist(json!({"messages":messages,"flushEach":true,"failWrites":true}));
+    assert!(failed["messages"].as_array().unwrap().iter().any(|m|m["type"]=="mutationResult" && m["ok"]==false));
+    assert_eq!(failed["background"],"");
+}
+
+#[test]
 fn lunar_rust_wrist_roundtrip_backup_and_old_date_protection() {
     use crate::ui::lunar;
     let value = json!({"year":2020,"month":4,"day":1,"leap":true});

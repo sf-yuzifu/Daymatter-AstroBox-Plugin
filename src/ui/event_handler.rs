@@ -99,8 +99,7 @@ async fn run_action(action: Action) {
             if let Some(data) = data {
                 match STANDARD.decode(&data) {
                     Ok(bytes) => {
-                        let mut hash = 2166136261u32;
-                        for byte in &bytes { hash = (hash ^ u32::from(*byte)).wrapping_mul(16777619); }
+                        let hash = super::background::checksum(&bytes);
                         let payload = serde_json::json!({"type":"beginBG","bytes":bytes.len(),"checksum":hash}).to_string();
                         { let mut state = write_state(); state.background_bytes = bytes; state.background_offset = 0; state.background_frame = None; }
                         let _ = message::launch_then_send(payload, SendPurpose::Background).await;

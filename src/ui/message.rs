@@ -10,7 +10,6 @@ use crate::ui::dispatch;
 use crate::ui::protocol::{self, MIN_APP_VERSION_CODE, PKG_NAME};
 use crate::ui::state::{local_date, read_state, write_state, PendingSend, SendPurpose, StatusKind};
 use chrono::Utc;
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 pub const HIDE_MESSAGE_TIMER: &str = "hide_message";
 pub const SEND_TIMER: &str = "send_pending:";
@@ -227,7 +226,7 @@ pub async fn drive_pending_send(token: u64) {
     }
     let mut business: serde_json::Value = serde_json::from_str(&pending.payload).unwrap_or_default();
     let capabilities = read_state().capabilities.clone();
-    if pending.purpose == SendPurpose::Background && !read_state().supports("backgroundChunks") {
+    if pending.purpose == SendPurpose::Background && !["backgroundChunks", "backgroundResult", "requestId", "mutationResult"].iter().all(|c|read_state().supports(c)) {
         clear_reservation(token);
         set_status(StatusKind::Error, "腕端未确认小分片背景能力，请更新腕端并重新读取屏幕");
         return;
@@ -291,6 +290,7 @@ pub async fn drive_pending_send(token: u64) {
     }
     if pending.purpose == SendPurpose::Background {
         write_state().background_frame = Some(payload.clone());
+        arm_background_timeout();
     }
     let result =
         interconnect::send_qaic_message(pending.device_addr.clone(), PKG_NAME.to_string(), payload)
@@ -312,7 +312,7 @@ pub async fn drive_pending_send(token: u64) {
             if result_protocol {
                 if purpose == SendPurpose::Background {
                     // begin先等待落盘ACK，业务结果计时在finish发送后启动。
-                    if read_state().background_offset == 0 { arm_background_timeout(); }
+                    // timer已在宿主发送await之前登记，早到ACK不会被旧回调重置。
                 } else { timer::set_timeout(RESULT_TIMEOUT_MS, &format!("{}{}", RESULT_TIMER, token)); }
                 set_status_timed(StatusKind::Info, "已发送，等待腕端保存确认…");
             } else if purpose == SendPurpose::Background {
@@ -364,29 +364,14 @@ fn arm_background_timeout() {
 }
 
 pub async fn background_ack(value: &serde_json::Value) {
-    let outgoing = {
-        let mut state = write_state();
-        let Some(request) = state.result_request.clone().filter(|r| r.purpose == SendPurpose::Background) else { return; };
-        if value["sessionId"].as_str() != Some(request.session_id.as_str()) || value["requestId"].as_str() != Some(request.request_id.as_str()) ||
-            value["deviceId"].as_str() != Some(request.device_id.as_str()) { return; }
-        let Some(next) = value["next"].as_u64().map(|n|n as usize) else { return; };
-        let expected = (state.background_offset + 3072).min(state.background_bytes.len());
-        let first = state.background_offset == 0 && state.background_frame.as_ref().is_some_and(|f| f.contains("beginBG"));
-        if (!first && next != expected) || (first && next != 0) { return; }
-        state.background_offset = next;
-        state.background_retries = 0;
-        let payload = if next == state.background_bytes.len() {
-            serde_json::json!({"type":"finishBG","sessionId":request.session_id,"requestId":request.request_id,"deviceId":request.device_id}).to_string()
-        } else {
-            let end = (next + 3072).min(state.background_bytes.len());
-            serde_json::json!({"type":"backgroundChunk","offset":next,"data":STANDARD.encode(&state.background_bytes[next..end]),
-                "sessionId":request.session_id,"requestId":request.request_id,"deviceId":request.device_id}).to_string()
-        };
-        state.background_frame = Some(payload.clone());
-        (request.device_addr, payload, next, state.background_bytes.len())
-    };
+    let Some(outgoing) = ({ super::background::accept_ack(&mut write_state(), value) }) else { return; };
     arm_background_timeout();
+    let generation = read_state().background_timer;
+    let devices = device::get_connected_device_list().await;
+    if read_state().background_timer != generation { return; }
+    if !devices.iter().any(|d| d.addr == outgoing.0) { set_status(StatusKind::Error, "背景目标已断开；重连原设备后等待重试或查询结果"); return; }
     let result = interconnect::send_qaic_message(outgoing.0, PKG_NAME.into(), outgoing.1).await;
+    if read_state().background_timer != generation { return; }
     if result.is_err() { set_status(StatusKind::Error, "分片发送异常，等待原片确认或有界重试"); }
     else if read_state().result_request.is_some() { set_status(StatusKind::Info, &format!("背景传输 {}/{} B，等待落盘确认", outgoing.2, outgoing.3)); }
 }
@@ -443,6 +428,9 @@ pub async fn handle_timer_event(payload: &str) {
         };
         if let Some(frame) = retry.1 {
             arm_background_timeout();
+            let generation = read_state().background_timer;
+            let devices = device::get_connected_device_list().await;
+            if read_state().background_timer != generation || !devices.iter().any(|d|d.addr == retry.0) { return; }
             let _ = interconnect::send_qaic_message(retry.0, PKG_NAME.into(), frame).await;
         }
         return;
