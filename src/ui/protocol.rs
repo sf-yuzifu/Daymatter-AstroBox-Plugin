@@ -53,8 +53,10 @@ pub fn new_session_id(sequence: u64) -> String {
 }
 
 pub fn capabilities(session_id: &str) -> String {
-    json!({"type":"hello", "protocolVersion":PROTOCOL_VERSION, "sessionId":session_id,
-        "capabilities":["stableId","mutationResult","requestId","listRequestId","listBatches","themeColor","primaryId","primaryMutation","backupRestore","revision","backgroundJpeg","yearlyRepeat","displayUnit","pinned","category","archived","manualOrder","sortMode"]}).to_string()
+    let mut value = json!({"type":"hello", "protocolVersion":PROTOCOL_VERSION, "sessionId":session_id,
+        "capabilities":["stableId","mutationResult","requestId","listRequestId","listBatches","themeColor","primaryId","primaryMutation","backupRestore","revision","backgroundJpeg","yearlyRepeat","displayUnit","pinned","category","archived","manualOrder","sortMode"]});
+    for capability in ["lunarDate","lunarYearly","lunarTable:dm-hko-v1"] {value["capabilities"].as_array_mut().unwrap().push(json!(capability));}
+    value.to_string()
 }
 
 pub fn handshake(session_id: &str, token: u64, device_id: &str) -> String {
@@ -100,7 +102,7 @@ pub fn add_event(draft: &EventData) -> String {
 }
 
 fn editable_extensions(payload: &mut Value, draft: &EventData) {
-    for field in ["repeat", "displayUnit", "pinned", "archived", "category"] {
+    for field in ["repeat", "displayUnit", "pinned", "archived", "category", "calendar", "lunarDate", "lunarTableVersion", "lunarLeapPolicy", "lunarShortMonthPolicy"] {
         if let Some(value) = draft.extensions.get(field) { payload[field] = value.clone(); }
     }
 }
@@ -233,6 +235,7 @@ pub fn parse_event_list(payload: &str) -> Result<ParsedEvents, ParseIssue> {
 }
 
 fn parse_event(item: &Value, index: usize) -> Option<EventData> {
+    if super::lunar::validate(item).is_err() {return None;}
     let object = item.as_object()?;
     if validate_extensions(item).is_err() { return None; }
     let name = object.get("name")?.as_str()?.to_string();
@@ -279,7 +282,17 @@ pub fn validate_extensions(value: &Value) -> Result<(), &'static str> {
 
 pub fn gate_extensions(value: &mut Value, capabilities: &[String]) -> Result<(), &'static str> {
     validate_extensions(value)?;
+    if value["calendar"] == "lunar" {
+        if !["lunarDate","lunarYearly","lunarTable:dm-hko-v1"].iter().all(|r|capabilities.iter().any(|c|c==r)) {
+            return Err("腕端未确认农历及换算表版本，请更新两端；业务消息未发送");
+        }
+        super::lunar::validate(value)?;
+    } else if !capabilities.iter().any(|c|c=="lunarDate") {
+        for key in ["calendar","lunarDate","lunarTableVersion","lunarLeapPolicy","lunarShortMonthPolicy"] {value.as_object_mut().unwrap().remove(key);}
+    }
     if value.get("type").and_then(Value::as_str) == Some("restoreBackup") {
+        if value["backup"]["data"]["events"].as_array().is_some_and(|events|events.iter().any(|e|e["calendar"]=="lunar"))
+            && !capabilities.iter().any(|c|c=="lunarTable:dm-hko-v1") {return Err("腕端未确认备份农历表版本，请更新两端");}
         if !["backupRestore", "stableId", "requestId", "mutationResult"].iter().all(|required| capabilities.iter().any(|c| c == required)) {
             return Err("腕端未确认备份恢复及保存回执能力，请更新腕端；业务消息未发送");
         }

@@ -17,6 +17,8 @@ pub enum FieldRole {
     Pinned,
     Archived,
     Category,
+    Calendar,
+    LeapMonth,
 }
 
 impl FieldRole {
@@ -31,6 +33,8 @@ impl FieldRole {
             FieldRole::Pinned => "pinned",
             FieldRole::Archived => "archived",
             FieldRole::Category => "category",
+            FieldRole::Calendar => "calendar",
+            FieldRole::LeapMonth => "leap_month",
         }
     }
 
@@ -45,6 +49,8 @@ impl FieldRole {
             FieldRole::Pinned => "置顶",
             FieldRole::Archived => "归档",
             FieldRole::Category => "分类",
+            FieldRole::Calendar => "历法",
+            FieldRole::LeapMonth => "原始农历日期为闰月",
         }
     }
 
@@ -59,10 +65,13 @@ impl FieldRole {
             FieldRole::Pinned => "置顶组优先，不改变表盘主事件",
             FieldRole::Archived => "首页隐藏，可恢复；归档主事件自动替代",
             FieldRole::Category => "选择事件所属分类，可在事件列表按分类筛选",
+            FieldRole::Calendar => "切换时保持同一天；农历年1900～2100",
+            FieldRole::LeapMonth => "年度无对应闰月按普通同月，三十遇小月按二十九",
         }
     }
 
-    pub const ALL: [FieldRole; 9] = [
+    pub const ALL: [FieldRole; 11] = [
+        FieldRole::Calendar, FieldRole::LeapMonth,
         FieldRole::Pinned, FieldRole::Archived, FieldRole::Category,
         FieldRole::Repeat,
         FieldRole::Unit,
@@ -143,7 +152,11 @@ pub enum UiId {
 }
 
 impl UiId {
-    pub const ALL: [UiId; 71] = [
+    pub const ALL: [UiId; 79] = [
+        UiId::Field(FormScope::Add,FieldRole::LeapMonth),UiId::Field(FormScope::Modify,FieldRole::LeapMonth),
+        UiId::Field(FormScope::Add,FieldRole::Calendar), UiId::Field(FormScope::Modify,FieldRole::Calendar),
+        UiId::SwitchOn(FormScope::Add,FieldRole::LeapMonth),UiId::SwitchOff(FormScope::Add,FieldRole::LeapMonth),
+        UiId::SwitchOn(FormScope::Modify,FieldRole::LeapMonth),UiId::SwitchOff(FormScope::Modify,FieldRole::LeapMonth),
         UiId::TemplateBirthday, UiId::TemplateExam, UiId::TemplateAnniversary,
         UiId::ExportBackup, UiId::ImportBackup, UiId::BackupMode, UiId::BackupConflict, UiId::RestoreBackup, UiId::CancelBackup,
         UiId::SetPrimary, UiId::CancelPrimary,
@@ -455,7 +468,29 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
             if let Some(draft) = state.draft_mut(scope) {
                 match role {
                     FieldRole::Name => draft.name = value,
-                    FieldRole::Date => draft.time = value,
+                    FieldRole::Date => {
+                        if draft.extensions.get("calendar").and_then(|v|v.as_str()) == Some("lunar") {
+                            draft.extensions.insert("lunarInput".into(),serde_json::json!(value));
+                        } else { draft.time = value; }
+                    }
+                    FieldRole::Calendar => {
+                        if value == "lunar" {
+                            if let Some(date) = super::lunar::from_solar(&draft.time) {
+                                let fields = super::lunar::fields(date.clone());
+                                for (key,value) in fields.as_object().unwrap() {draft.extensions.insert(key.clone(),value.clone());}
+                                draft.extensions.insert("lunarInput".into(),serde_json::json!(format!("{:04}-{:02}-{:02}",date["year"].as_i64().unwrap(),date["month"].as_u64().unwrap(),date["day"].as_u64().unwrap())));
+                            } else { status = Some(StatusMessage::error("当前日期不在农历1900～2100范围内")); }
+                        } else if value == "solar" {
+                            match super::lunar::prepare(draft) {
+                                Ok(updated) => {
+                                    *draft = updated;
+                                    for key in ["lunarDate","lunarTableVersion","lunarLeapPolicy","lunarShortMonthPolicy","lunarInput"] {draft.extensions.remove(key);}
+                                    draft.extensions.insert("calendar".into(),serde_json::json!("solar"));
+                                }
+                                Err(error) => {status=Some(StatusMessage::error(error));}
+                            }
+                        }
+                    }
                     FieldRole::Unit => { draft.extensions.insert("displayUnit".into(), serde_json::json!(value)); }
                     FieldRole::Category => { draft.extensions.insert("category".into(), serde_json::json!(value)); }
                     _ => {}
@@ -463,6 +498,7 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
             }
             // 输入只改草稿，不清状态条，避免用户刚看到的错误提示被输入抹掉
             rebuild = false;
+            if role == FieldRole::Calendar { rebuild = true; }
         }
         Action::SetSwitch { scope, role, on } => {
             if let Some(draft) = state.draft_mut(scope) {
@@ -472,6 +508,7 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
                     FieldRole::Repeat => { draft.extensions.insert("repeat".into(), serde_json::json!(if on { "yearly" } else { "none" })); }
                     FieldRole::Pinned => { draft.extensions.insert("pinned".into(), serde_json::json!(on)); }
                     FieldRole::Archived => { draft.extensions.insert("archived".into(), serde_json::json!(on)); }
+                    FieldRole::LeapMonth => { draft.extensions.entry("lunarDate".into()).or_insert_with(||serde_json::json!({}))["leap"] = serde_json::json!(on); }
                     _ => {}
                 }
             }

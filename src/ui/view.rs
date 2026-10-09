@@ -208,9 +208,9 @@ fn form_fields(scope: FormScope, state: &UiState) -> Vec<FieldView> {
         },
         FieldView::Text {
             id: UiId::Field(scope, FieldRole::Date),
-            value: draft.time.clone(),
-            label: FieldRole::Date.label(),
-            hint: FieldRole::Date.hint(),
+            value: draft.extensions.get("lunarInput").and_then(|v|v.as_str()).unwrap_or(&draft.time).into(),
+            label: if draft.extensions.get("calendar").and_then(|v|v.as_str())==Some("lunar") {"农历原始日期"} else {FieldRole::Date.label()},
+            hint: "YYYY-MM-DD；农历需选择闰月，发送前校验并换算公历",
         },
         FieldView::Switch {
             on_id: UiId::SwitchOn(scope, FieldRole::OnHome),
@@ -239,6 +239,13 @@ fn form_fields(scope: FormScope, state: &UiState) -> Vec<FieldView> {
             label: FieldRole::Unit.label(), hint: FieldRole::Unit.hint(),
         },
     ];
+    fields.insert(0,FieldView::Select {id:UiId::Field(scope,FieldRole::Calendar),
+        value:draft.extensions.get("calendar").and_then(|v|v.as_str()).unwrap_or("solar").into(),
+        options:vec![("solar","公历"),("lunar","农历")],label:FieldRole::Calendar.label(),hint:FieldRole::Calendar.hint()});
+    if draft.extensions.get("calendar").and_then(|v|v.as_str()) == Some("lunar") {
+        fields.push(FieldView::Switch {on_id:UiId::SwitchOn(scope,FieldRole::LeapMonth),off_id:UiId::SwitchOff(scope,FieldRole::LeapMonth),
+            on:draft.extensions.get("lunarDate").and_then(|v|v.get("leap")).and_then(|v|v.as_bool()).unwrap_or(false),label:FieldRole::LeapMonth.label(),hint:FieldRole::LeapMonth.hint()});
+    }
     for (role, key) in [(FieldRole::Pinned, "pinned"), (FieldRole::Archived, "archived")] {
         fields.push(FieldView::Switch { on_id: UiId::SwitchOn(scope, role), off_id: UiId::SwitchOff(scope, role),
             on: draft.extensions.get(key).and_then(|v| v.as_bool()).unwrap_or(false), label: role.label(), hint: role.hint() });
@@ -264,13 +271,14 @@ fn event_list(scope: FormScope, state: &UiState) -> EventListView {
             if event.extensions.get("archived").and_then(|v| v.as_bool()) == Some(true) { badges.push("已归档".into()); }
             badges.push(category_label(event.extensions.get("category").and_then(|v| v.as_str()).unwrap_or("uncategorized")).into());
             if event.extensions.get("repeat").and_then(|v| v.as_str()) == Some("yearly") {
-                if let Some((date, Some(years))) = crate::ui::validation::occurrence(&event.time, "yearly", &state.today) {
+                if let Some((date, Some(years))) = crate::ui::validation::event_occurrence(event, &state.today) {
                     badges.push(format!("下次 {} · 第{}周年", date, years));
                 }
             }
             if event.on_index {
                 badges.push("首页".to_string());
             }
+            if event.extensions.get("calendar").and_then(|v|v.as_str())==Some("lunar") { badges.push("农历".into()); }
             if !event.id.is_empty() && state.primary_id.as_deref() == Some(event.id.as_str()) {
                 badges.push("表盘".to_string());
             }
@@ -387,7 +395,7 @@ pub fn build(state: &UiState) -> ViewModel {
             model.form = Some(FormView {
                 scope: FormScope::Add,
                 title: "事件信息",
-                description: reserved_note(),
+                description: if state.event_data.extensions.get("calendar").and_then(|v|v.as_str())==Some("lunar") {calendar_description(FormScope::Add,state)} else {reserved_note()},
                 fields: form_fields(FormScope::Add, state),
             });
             model.primary = Some(ActionView {
@@ -448,7 +456,7 @@ pub fn build(state: &UiState) -> ViewModel {
             model.form = Some(FormView {
                 scope,
                 title: "事件信息",
-                description: "未改动的字段保持腕端原值".to_string(),
+                description: calendar_description(scope, state),
                 fields: form_fields(scope, state),
             });
             model.primary = Some(ActionView {
@@ -565,6 +573,16 @@ pub fn should_render(state: &mut UiState, force: bool) -> Option<ViewModel> {
 /// 预留字段说明文案（F-01 / F-02 / F-03 落地时替换成真实控件）
 pub fn reserved_note() -> String {
     "置顶、分类与归档需腕端确认对应能力；表盘主事件请在修改页单独指定".into()
+}
+
+fn calendar_description(scope:FormScope,state:&UiState) -> String {
+    let Some(draft)=state.draft(scope) else {return String::new();};
+    if draft.extensions.get("calendar").and_then(|v|v.as_str())==Some("lunar") {
+        match super::lunar::prepare(draft) {
+            Ok(event)=>format!("对应公历：{}；闰月无对应按普通月，三十遇小月按月末",event.time),
+            Err(error)=>error.into(),
+        }
+    } else {"未改动的字段保持腕端原值".into()}
 }
 
 fn category_label(key: &str) -> &'static str {
@@ -897,11 +915,12 @@ mod tests {
     fn 添加页字段顺序与说明固定() {
         let state = UiState::new("2026-10-06".to_string());
         let fields = form_fields(FormScope::Add, &state);
-        assert_eq!(fields.len(), 9);
-        assert!(matches!(fields[0], FieldView::Text { .. }));
+        assert_eq!(fields.len(), 10);
+        assert!(matches!(fields[0], FieldView::Select { .. }));
         assert!(matches!(fields[1], FieldView::Text { .. }));
-        assert!(matches!(fields[2], FieldView::Switch { on: true, .. }));
-        assert!(matches!(fields[3], FieldView::Switch { on: false, .. }));
+        assert!(matches!(fields[2], FieldView::Text { .. }));
+        assert!(matches!(fields[3], FieldView::Switch { on: true, .. }));
+        assert!(matches!(fields[4], FieldView::Switch { on: false, .. }));
         assert_eq!(build(&state).form.as_ref().unwrap().description, reserved_note());
     }
 

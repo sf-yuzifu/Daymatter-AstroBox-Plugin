@@ -1,6 +1,10 @@
 use std::fmt;
 
 pub const MAX_NAME_LENGTH: usize = 50;
+pub fn event_occurrence(event:&super::state::EventData,today:&str) -> Option<(String,Option<i32>)> {
+    if event.extensions.get("calendar").and_then(|v|v.as_str()) == Some("lunar") {return super::lunar::occurrence(event,today);}
+    occurrence(&event.time,event.extensions.get("repeat").and_then(|v|v.as_str()).unwrap_or("none"),today)
+}
 
 pub fn occurrence(date: &str, repeat: &str, today: &str) -> Option<(String, Option<i32>)> {
     use chrono::{Datelike, NaiveDate};

@@ -3,6 +3,7 @@
 
 pub mod dispatch;
 pub mod backup;
+pub mod lunar;
 pub mod protocol;
 pub mod state;
 pub mod theme;

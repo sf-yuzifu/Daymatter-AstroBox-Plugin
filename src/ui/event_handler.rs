@@ -157,6 +157,7 @@ fn validate_draft(draft: &EventData, previous: Option<&str>) -> Option<String> {
 
 async fn submit_add() {
     let mut draft = draft_of(FormScope::Add);
+    draft = match super::lunar::prepare(&draft) {Ok(draft)=>draft,Err(error)=>{message::set_status(StatusKind::Error,error);return;}};
     draft.time = draft.time.trim().to_string();
     if let Some(error) = validate_draft(&draft, None) {
         message::set_status_timed(StatusKind::Error, &error);
@@ -181,6 +182,7 @@ async fn submit_modify() {
         return;
     }
     let mut draft = draft_of(FormScope::Modify);
+    draft = match super::lunar::prepare(&draft) {Ok(draft)=>draft,Err(error)=>{message::set_status(StatusKind::Error,error);return;}};
     let previous = {
         let state = read_state();
         state.index_of_key(&key).and_then(|index| state.all_events.get(index)).map(|event| event.name.clone())

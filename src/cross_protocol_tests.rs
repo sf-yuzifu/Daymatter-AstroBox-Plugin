@@ -13,6 +13,32 @@ fn wrist(input: Value) -> Value {
 }
 
 #[test]
+fn lunar_rust_wrist_roundtrip_backup_and_old_date_protection() {
+    use crate::ui::lunar;
+    let value = json!({"year":2020,"month":4,"day":1,"leap":true});
+    let mut draft = EventData::draft("农历生日","2020-05-23",true,false);
+    for (key,value) in lunar::fields(value).as_object().unwrap() {draft.extensions.insert(key.clone(),value.clone());}
+    draft.extensions.insert("repeat".into(),json!("yearly"));
+    let request = protocol::set_request_identity_for(&protocol::add_event(&draft),"lunar-add","cross-session","watch");
+    let output = wrist(json!({"messages":[protocol::capabilities("cross-session"),request,
+        json!({"type":"changeEvent","index":0,"name":"旧端改名"}).to_string(),
+        protocol::set_request_identity_for(&json!({"type":"changeEvent","index":0,"date":"2026-01-01"}).to_string(),"old-date","cross-session","watch"),
+        protocol::get_all_events()]}));
+    let list = output["messages"].as_array().unwrap().iter().find(|m|m.get("data").is_some()).unwrap();
+    let parsed = protocol::parse_event_list(&list.to_string()).unwrap();
+    assert_eq!(parsed.skipped,0);
+    assert_eq!(parsed.events[0].extensions["lunarDate"]["leap"],true);
+    assert_eq!(parsed.events[0].time,"2020-05-23");
+    assert!(output["messages"].as_array().unwrap().iter().any(|m|m["code"]=="LUNAR_DATE_PROTECTED"));
+    crate::ui::backup::make(&parsed.events,&parsed.primary_id.unwrap(),"created").unwrap();
+    assert_eq!(lunar::to_solar(&json!({"year":2057,"month":9,"day":1,"leap":false})).as_deref(),Some("2057-09-28"));
+    assert_eq!(lunar::to_solar(&json!({"year":2097,"month":7,"day":1,"leap":false})).as_deref(),Some("2097-08-07"));
+    assert!(lunar::occurrence(&draft,"2102-01-01").is_none());
+    let mut payload:Value=serde_json::from_str(&protocol::add_event(&draft)).unwrap();
+    assert!(protocol::gate_extensions(&mut payload,&[]).is_err());
+}
+
+#[test]
 fn backup_merge_replace_integrity_revision_failure_and_large_payload() {
     use crate::ui::backup;
     let mut old = EventData::draft("同名😀", "2020-02-29", true, false);

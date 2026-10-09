@@ -327,6 +327,11 @@ impl UiState {
         };
         self.selected_event_key = Some(key.to_string());
         self.modify_event_data = event;
+        if self.modify_event_data.extensions.get("calendar").and_then(|v|v.as_str()) == Some("lunar") {
+            let date = &self.modify_event_data.extensions["lunarDate"];
+            let input = format!("{:04}-{:02}-{:02}",date["year"].as_i64().unwrap(),date["month"].as_u64().unwrap(),date["day"].as_u64().unwrap());
+            self.modify_event_data.extensions.insert("lunarInput".into(),serde_json::json!(input));
+        }
         true
     }
 
@@ -891,7 +896,7 @@ impl UiState {
         events.sort_by_key(|(index, e)| {
             let pin = !e.extensions.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false);
             let order = e.extensions.get("sortOrder").and_then(|v| v.as_u64()).unwrap_or(*index as u64);
-            let occurrence = crate::ui::validation::occurrence(&e.time, e.extensions.get("repeat").and_then(|v| v.as_str()).unwrap_or("none"), &self.today);
+            let occurrence = crate::ui::validation::event_occurrence(e, &self.today);
             let date = occurrence.map(|(d, _)| d).unwrap_or_else(|| e.time.clone());
             let past = date < self.today;
             let day = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok().map(|d| d.num_days_from_ce()).unwrap_or(i32::MAX);
@@ -903,8 +908,7 @@ impl UiState {
     }
 
     fn period_matches(&self, event: &EventData) -> bool {
-        let repeat = event.extensions.get("repeat").and_then(|v| v.as_str()).unwrap_or("none");
-        let Some((date, _)) = crate::ui::validation::occurrence(&event.time, repeat, &self.today) else { return false; };
+        let Some((date, _)) = crate::ui::validation::event_occurrence(event, &self.today) else { return false; };
         let Some(days) = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok().zip(
             chrono::NaiveDate::parse_from_str(&self.today, "%Y-%m-%d").ok()).map(|(date, today)| (date - today).num_days()) else { return false; };
         if self.list_period == "today" { days == 0 } else { (0..=30).contains(&days) }
