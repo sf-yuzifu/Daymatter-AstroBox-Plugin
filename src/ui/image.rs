@@ -34,7 +34,19 @@ fn check_dimensions(width: u32, height: u32) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn compress_for_watch(image_data: &[u8]) -> Result<Vec<u8>, String> {
+    prepare(image_data, None)
+}
+
+pub fn prepare_for_screen(data: &[u8], width: u32, height: u32, cover: bool) -> Result<Vec<u8>, String> {
+    if width == 0 || height == 0 || width > 512 || height > 512 {
+        return Err("原尺寸背景预算为单边1～512px".into());
+    }
+    prepare(data, Some((width, height, cover)))
+}
+
+fn prepare(image_data: &[u8], target: Option<(u32, u32, bool)>) -> Result<Vec<u8>, String> {
     if image_data.is_empty() || image_data.len() > MAX_INPUT_BYTES {
         return Err("图片数据为空或文件超过16MiB预算".to_string());
     }
@@ -48,7 +60,24 @@ pub fn compress_for_watch(image_data: &[u8]) -> Result<Vec<u8>, String> {
     let (width, height) = decoded.dimensions();
     check_dimensions(width, height)?;
     let (target_width, target_height) = scaled(width, height);
-    let resized = if (target_width, target_height) == (width, height) {
+    let resized = if let Some((screen_width, screen_height, cover)) = target {
+        let (w, h) = (screen_width, screen_height);
+        if cover {
+            // 先裁原图再缩放，避免极端长宽比resize_to_fill生成巨大中间图。
+            let (crop_w, crop_h) = if u64::from(width) * u64::from(h) > u64::from(height) * u64::from(w) {
+                (((u64::from(height) * u64::from(w)) / u64::from(h)).max(1) as u32, height)
+            } else {
+                (width, ((u64::from(width) * u64::from(h)) / u64::from(w)).max(1) as u32)
+            };
+            let cropped = decoded.crop_imm((width - crop_w) / 2, (height - crop_h) / 2, crop_w, crop_h);
+            cropped.resize_exact(w, h, FilterType::Lanczos3)
+        } else {
+            let inner = decoded.resize(w, h, FilterType::Lanczos3).to_rgba8();
+            let mut canvas = image::RgbaImage::from_pixel(w, h, image::Rgba([0, 0, 0, 255]));
+            image::imageops::overlay(&mut canvas, &inner, i64::from((w - inner.width()) / 2), i64::from((h - inner.height()) / 2));
+            image::DynamicImage::ImageRgba8(canvas)
+        }
+    } else if (target_width, target_height) == (width, height) {
         decoded
     } else {
         decoded.resize(target_width, target_height, FilterType::Lanczos3)
@@ -146,5 +175,21 @@ mod tests {
         let decoded = image::load_from_memory(&output).unwrap().to_rgb8();
         assert_eq!(decoded.dimensions(), (450, 225));
         assert!(decoded.get_pixel(0, 0).0.iter().all(|value| *value >= 250));
+    }
+
+    #[test]
+    fn 目标比例裁剪与留边成品不拉伸() {
+        let source = image::RgbImage::from_pixel(200, 100, image::Rgb([255, 0, 0]));
+        let mut data = Cursor::new(Vec::new());
+        source.write_to(&mut data, image::ImageFormat::Png).unwrap();
+        for cover in [true, false] {
+            let output = prepare_for_screen(data.get_ref(), 192, 490, cover).unwrap();
+            let result = image::load_from_memory(&output).unwrap().to_rgb8();
+            assert_eq!(result.dimensions(), (192, 490));
+            let top = result.get_pixel(88, 0);
+            if cover { assert!(top[0] > 240); } else { assert!(top.0.iter().all(|v| *v < 10)); }
+            assert!(result.get_pixel(88, 225)[0] > 240);
+        }
+        assert!(prepare_for_screen(data.get_ref(), 0, 490, true).is_err());
     }
 }

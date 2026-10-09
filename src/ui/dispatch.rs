@@ -130,6 +130,10 @@ pub enum UiId {
     PagePrev(FormScope),
     PageNext(FormScope),
     PickBackground,
+    BackgroundWidth,
+    BackgroundHeight,
+    BackgroundMode,
+    SendBackground,
     StatusDismiss,
     BackOverview,
     FinishUnknown,
@@ -152,7 +156,8 @@ pub enum UiId {
 }
 
 impl UiId {
-    pub const ALL: [UiId; 79] = [
+    pub const ALL: [UiId; 83] = [
+        UiId::BackgroundWidth, UiId::BackgroundHeight, UiId::BackgroundMode, UiId::SendBackground,
         UiId::Field(FormScope::Add,FieldRole::LeapMonth),UiId::Field(FormScope::Modify,FieldRole::LeapMonth),
         UiId::Field(FormScope::Add,FieldRole::Calendar), UiId::Field(FormScope::Modify,FieldRole::Calendar),
         UiId::SwitchOn(FormScope::Add,FieldRole::LeapMonth),UiId::SwitchOff(FormScope::Add,FieldRole::LeapMonth),
@@ -222,6 +227,10 @@ impl UiId {
             UiId::PagePrev(scope) => format!("action.{}.page.prev", scope.as_str()),
             UiId::PageNext(scope) => format!("action.{}.page.next", scope.as_str()),
             UiId::PickBackground => "action.background.pick".to_string(),
+            UiId::BackgroundWidth => "field.background.width".into(),
+            UiId::BackgroundHeight => "field.background.height".into(),
+            UiId::BackgroundMode => "action.background.mode".into(),
+            UiId::SendBackground => "action.background.send".into(),
             UiId::BackOverview => "nav.back".to_string(),
             UiId::StatusDismiss => "status.dismiss".to_string(),
             UiId::FinishUnknown => "action.result.reviewed".to_string(),
@@ -305,6 +314,9 @@ pub enum Action {
     ConfirmDelete,
     CancelDelete,
     PickBackground,
+    BackgroundSize(bool, String),
+    BackgroundMode,
+    SendBackground,
     DismissStatus,
     FinishUnknown,
 }
@@ -377,6 +389,10 @@ pub fn resolve(id: &str, kind: UiEventKind, payload: &str) -> Option<Action> {
         UiId::PagePrev(scope) if click => Action::PageStep { scope, delta: -1 },
         UiId::PageNext(scope) if click => Action::PageStep { scope, delta: 1 },
         UiId::PickBackground if click => Action::PickBackground,
+        UiId::BackgroundWidth if !click => Action::BackgroundSize(true, payload_text(payload)),
+        UiId::BackgroundHeight if !click => Action::BackgroundSize(false, payload_text(payload)),
+        UiId::BackgroundMode if click => Action::BackgroundMode,
+        UiId::SendBackground if click => Action::SendBackground,
         UiId::StatusDismiss if click => Action::DismissStatus,
         UiId::FinishUnknown if click => Action::FinishUnknown,
         _ => return None,
@@ -400,13 +416,27 @@ pub fn apply_action(state: &mut UiState, action: Action) -> StateChange {
     if state.busy()
         && matches!(
             action,
-            Action::SubmitAdd | Action::SubmitModify | Action::RequestDelete | Action::PickBackground | Action::MoveEvent(_) | Action::SortMode | Action::Primary(_) |
+            Action::SubmitAdd | Action::SubmitModify | Action::RequestDelete | Action::PickBackground | Action::BackgroundSize(_, _) | Action::BackgroundMode | Action::SendBackground | Action::MoveEvent(_) | Action::SortMode | Action::Primary(_) |
             Action::ExportBackup | Action::ImportBackup | Action::RestoreBackup | Action::BackupMode | Action::BackupConflict | Action::CancelBackup | Action::Template(_)
         )
     {
         return StateChange { action, rebuild: false, status: None };
     }
     match action.clone() {
+        Action::BackgroundSize(width, value) => {
+            let value: String = value.chars().take(6).collect();
+            if width { state.background_width = value; } else { state.background_height = value; }
+            state.background_preview = None;
+            state.background_detail.clear();
+            // 连续输入不重建输入框；发送入口会核对预览是否仍有效。
+            rebuild = false;
+        }
+        Action::BackgroundMode => {
+            state.background_cover = !state.background_cover;
+            state.background_preview = None;
+            state.background_detail.clear();
+        }
+        Action::SendBackground => { rebuild = false; }
         Action::Template(kind) => {
             if state.current_tab != crate::ui::state::EventType::AddEvent { rebuild = false; }
             else {
@@ -602,12 +632,29 @@ mod tests {
     }
 
     #[test]
+    fn 背景参数改变使预览失效且在途不能改参数() {
+        let mut state = UiState::new("2026-10-09".into());
+        state.background_preview = Some("jpeg".into());
+        let change = apply_action(&mut state, Action::BackgroundSize(true, "336".into()));
+        assert!(!change.rebuild);
+        assert!(state.background_preview.is_none());
+        assert_eq!(state.background_width, "336");
+        state.background_preview = Some("jpeg".into());
+        apply_action(&mut state, Action::BackgroundMode);
+        assert!(!state.background_cover);
+        assert!(state.background_preview.is_none());
+        state.local_file_busy = true;
+        apply_action(&mut state, Action::BackgroundSize(false, "480".into()));
+        assert_eq!(state.background_height, "490");
+    }
+
+    #[test]
     fn 文本字段只响应变更_其余标识只响应点击() {
         for id in UiId::ALL {
             let click = resolve(&id.as_str(), UiEventKind::Click, "");
             let change = resolve(&id.as_str(), UiEventKind::Change, r#"{"value":"x"}"#);
             match id {
-                UiId::Field(_, _) => {
+                UiId::Field(_, _) | UiId::BackgroundWidth | UiId::BackgroundHeight => {
                     assert!(click.is_none(), "{} 是文本框，不应有点击分支", id.as_str());
                     assert!(change.is_some(), "{} 缺少变更分支", id.as_str());
                 }

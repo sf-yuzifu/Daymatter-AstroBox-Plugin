@@ -39,6 +39,11 @@ fn cards(blocks: &[CardBlock]) -> Vec<ui::Element> {
             CardBlock::Actionable { title, description, symbol, event } => {
                 w::action_card(title, description, symbol, event)
             }
+            CardBlock::Image {source, description, width, height} => w::panel()
+                .child(w::row().justify_center().child(
+                    ui::Element::new(ui::ElementType::Image, Some(source)).width(*width).height(*height)
+                        .flex_shrink(0.0).prop("style", "object-fit:contain;background:#000")))
+                .child(w::hint(description)),
         })
         .collect()
 }

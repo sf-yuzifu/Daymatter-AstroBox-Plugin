@@ -88,6 +88,27 @@ async fn run_action(action: Action) {
         }
         Action::RequestDelete => request_delete().await,
         Action::PickBackground => pick_background().await,
+        Action::SwitchSegment(super::state::EventType::AddBackground) => {
+            if !read_state().busy() { let _ = message::launch_then_send(protocol::get_all_events(), SendPurpose::Fetch).await; }
+        }
+        Action::SendBackground => {
+            let devices = crate::astrobox::psys_host_v4::device::get_connected_device_list().await;
+            let matches = { let state = read_state(); devices.first().is_some_and(|d| state.background_device.as_deref() == Some(d.addr.as_str())) };
+            if !matches { message::set_status(StatusKind::Error, "连接设备已变化，请重新读取屏幕并生成预览"); return; }
+            let data = { let state = read_state(); if state.busy() { return; } state.background_preview.clone() };
+            if let Some(data) = data {
+                match STANDARD.decode(&data) {
+                    Ok(bytes) => {
+                        let mut hash = 2166136261u32;
+                        for byte in &bytes { hash = (hash ^ u32::from(*byte)).wrapping_mul(16777619); }
+                        let payload = serde_json::json!({"type":"beginBG","bytes":bytes.len(),"checksum":hash}).to_string();
+                        { let mut state = write_state(); state.background_bytes = bytes; state.background_offset = 0; state.background_frame = None; }
+                        let _ = message::launch_then_send(payload, SendPurpose::Background).await;
+                    }
+                    Err(_) => message::set_status(StatusKind::Error, "预览成品损坏，请重新选图"),
+                }
+            } else { message::set_status(StatusKind::Error, "参数已变化，请重新选择图片生成预览"); }
+        }
         _ => {}
     }
 }
@@ -270,6 +291,25 @@ async fn request_delete() {
 }
 
 async fn pick_background() {
+    let devices = crate::astrobox::psys_host_v4::device::get_connected_device_list().await;
+    let target = {
+        let mut state = write_state();
+        if state.busy() { return; }
+        if !devices.first().is_some_and(|d| state.background_device.as_deref() == Some(d.addr.as_str())) {
+            drop(state);
+            message::set_status(StatusKind::Error, "请先读取连接设备屏幕；更新腕端后再试");
+            return;
+        }
+        let dimensions = state.background_width.parse::<u32>().ok().zip(state.background_height.parse::<u32>().ok());
+        let Some((width, height)) = dimensions.filter(|(w,h)| (1..=2048).contains(w) && (1..=2048).contains(h)) else {
+            drop(state);
+            message::set_status(StatusKind::Error, "目标宽高须为1～2048px");
+            return;
+        };
+        state.local_file_busy = true;
+        (width, height, state.background_cover)
+    };
+    build::refresh(false);
     let pick_config = PickConfig { read: true, copy_to: None };
     let filter_config = FilterConfig {
         multiple: false,
@@ -279,22 +319,23 @@ async fn pick_background() {
     };
     let picked = pick_file(pick_config, filter_config).await;
     let Ok(picked) = picked else {
+        write_state().local_file_busy = false;
         message::set_status_timed(StatusKind::Error, "未选择图片");
         return;
     };
-    let compressed = crate::ui::image::compress_for_watch(&picked.data);
+    let compressed = crate::ui::image::prepare_for_screen(&picked.data, target.0, target.1, target.2);
     // 不把原始大图保留到连接/发送await期间。
     drop(picked);
+    write_state().local_file_busy = false;
     match compressed {
         Ok(compressed) => {
-            if message::launch_then_send(
-                protocol::add_background(&STANDARD.encode(&compressed)),
-                SendPurpose::Background,
-            )
-            .await == Err(SendStartError::Busy)
             {
-                message::set_status_timed(StatusKind::Info, "已有操作正在进行，请先同步腕端结果");
+                let mut state = write_state();
+                state.background_preview = Some(STANDARD.encode(&compressed));
+                state.background_detail = format!("原尺寸{}×{} · {} · JPEG {}B；3KiB小分片逐片落盘，确认后才发送。", target.0, target.1,
+                    if target.2 {"居中裁剪"} else {"等比留黑边"}, compressed.len());
             }
+            message::set_status(StatusKind::Success, "成品已生成，请核对预览后发送");
         }
         Err(error) => {
             message::set_status_timed(StatusKind::Error, &error);
@@ -305,6 +346,7 @@ async fn pick_background() {
 /// 腕端互联消息：解析事件列表并刷新界面（E-12 无效条目与越界防护）
 pub async fn handle_interconnect_message(payload: &str) {
     if let Ok(value) = protocol::decode_message(payload) {
+        if value["type"] == "backgroundAck" { message::background_ack(&value).await; return; }
         if matches!(value.get("type").and_then(|v| v.as_str()), Some("eventListBatch" | "eventListError")) {
             let (render, token) = {
                 let mut state = write_state();

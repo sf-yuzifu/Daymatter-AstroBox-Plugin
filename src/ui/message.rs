@@ -10,6 +10,7 @@ use crate::ui::dispatch;
 use crate::ui::protocol::{self, MIN_APP_VERSION_CODE, PKG_NAME};
 use crate::ui::state::{local_date, read_state, write_state, PendingSend, SendPurpose, StatusKind};
 use chrono::Utc;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 pub const HIDE_MESSAGE_TIMER: &str = "hide_message";
 pub const SEND_TIMER: &str = "send_pending:";
@@ -226,6 +227,11 @@ pub async fn drive_pending_send(token: u64) {
     }
     let mut business: serde_json::Value = serde_json::from_str(&pending.payload).unwrap_or_default();
     let capabilities = read_state().capabilities.clone();
+    if pending.purpose == SendPurpose::Background && !read_state().supports("backgroundChunks") {
+        clear_reservation(token);
+        set_status(StatusKind::Error, "腕端未确认小分片背景能力，请更新腕端并重新读取屏幕");
+        return;
+    }
     if let Err(error) = protocol::gate_extensions(&mut business, &capabilities) {
         clear_reservation(token);
         set_status_timed(StatusKind::Error, error);
@@ -254,7 +260,8 @@ pub async fn drive_pending_send(token: u64) {
     }
     let (payload, result_protocol) = {
         let mut state = write_state();
-        let enabled = pending.purpose == SendPurpose::Mutation
+        let enabled = (pending.purpose == SendPurpose::Mutation ||
+            (pending.purpose == SendPurpose::Background && state.supports("backgroundResult")))
             && ["requestId", "mutationResult"].iter().all(|required| state.supports(required));
         if enabled {
             state.begin_result_wait(&pending);
@@ -272,6 +279,8 @@ pub async fn drive_pending_send(token: u64) {
                 payload = value.to_string();
             }
             (payload, false)
+        } else if pending.purpose == SendPurpose::Background {
+            (business_payload, false)
         } else {
             state.begin_legacy_wait(&pending);
             (business_payload, false)
@@ -279,6 +288,9 @@ pub async fn drive_pending_send(token: u64) {
     };
     if pending.purpose == SendPurpose::Fetch {
         timer::set_timeout(RESULT_TIMEOUT_MS, &format!("{}{}", LIST_TIMER, token));
+    }
+    if pending.purpose == SendPurpose::Background {
+        write_state().background_frame = Some(payload.clone());
     }
     let result =
         interconnect::send_qaic_message(pending.device_addr.clone(), PKG_NAME.to_string(), payload)
@@ -290,7 +302,7 @@ pub async fn drive_pending_send(token: u64) {
         };
         let purpose = completed.purpose;
         if purpose != SendPurpose::Fetch {
-            if !result_protocol && state.legacy_request.is_none() { state.require_confirmation(completed.base_revision); }
+            if purpose != SendPurpose::Background && !result_protocol && state.legacy_request.is_none() { state.require_confirmation(completed.base_revision); }
         }
         drop(state);
         if purpose == SendPurpose::Fetch {
@@ -298,8 +310,13 @@ pub async fn drive_pending_send(token: u64) {
             set_status_timed(StatusKind::Info, "请求已发送，等待腕端数据…");
         } else {
             if result_protocol {
-                timer::set_timeout(RESULT_TIMEOUT_MS, &format!("{}{}", RESULT_TIMER, token));
+                if purpose == SendPurpose::Background {
+                    // begin先等待落盘ACK，业务结果计时在finish发送后启动。
+                    if read_state().background_offset == 0 { arm_background_timeout(); }
+                } else { timer::set_timeout(RESULT_TIMEOUT_MS, &format!("{}{}", RESULT_TIMER, token)); }
                 set_status_timed(StatusKind::Info, "已发送，等待腕端保存确认…");
+            } else if purpose == SendPurpose::Background {
+                set_status_timed(StatusKind::Info, "背景已发送；腕端未协商背景保存回执，请在腕端核实显示");
             } else {
                 set_status_timed(StatusKind::Info, dispatch::SENT_TEXT);
             }
@@ -341,6 +358,39 @@ async fn fail_attempt(token: u64, pending: PendingSend, message: &str) {
     }
 }
 
+fn arm_background_timeout() {
+    let generation = { let mut state = write_state(); state.background_timer += 1; state.background_timer };
+    timer::set_timeout(8000, &format!("background_timeout:{generation}"));
+}
+
+pub async fn background_ack(value: &serde_json::Value) {
+    let outgoing = {
+        let mut state = write_state();
+        let Some(request) = state.result_request.clone().filter(|r| r.purpose == SendPurpose::Background) else { return; };
+        if value["sessionId"].as_str() != Some(request.session_id.as_str()) || value["requestId"].as_str() != Some(request.request_id.as_str()) ||
+            value["deviceId"].as_str() != Some(request.device_id.as_str()) { return; }
+        let Some(next) = value["next"].as_u64().map(|n|n as usize) else { return; };
+        let expected = (state.background_offset + 3072).min(state.background_bytes.len());
+        let first = state.background_offset == 0 && state.background_frame.as_ref().is_some_and(|f| f.contains("beginBG"));
+        if (!first && next != expected) || (first && next != 0) { return; }
+        state.background_offset = next;
+        state.background_retries = 0;
+        let payload = if next == state.background_bytes.len() {
+            serde_json::json!({"type":"finishBG","sessionId":request.session_id,"requestId":request.request_id,"deviceId":request.device_id}).to_string()
+        } else {
+            let end = (next + 3072).min(state.background_bytes.len());
+            serde_json::json!({"type":"backgroundChunk","offset":next,"data":STANDARD.encode(&state.background_bytes[next..end]),
+                "sessionId":request.session_id,"requestId":request.request_id,"deviceId":request.device_id}).to_string()
+        };
+        state.background_frame = Some(payload.clone());
+        (request.device_addr, payload, next, state.background_bytes.len())
+    };
+    arm_background_timeout();
+    let result = interconnect::send_qaic_message(outgoing.0, PKG_NAME.into(), outgoing.1).await;
+    if result.is_err() { set_status(StatusKind::Error, "分片发送异常，等待原片确认或有界重试"); }
+    else if read_state().result_request.is_some() { set_status(StatusKind::Info, &format!("背景传输 {}/{} B，等待落盘确认", outgoing.2, outgoing.3)); }
+}
+
 /// 用户刷新时也核实原请求，不重发 mutation。
 pub async fn query_original_result() {
     let query = write_state().begin_result_query();
@@ -377,6 +427,26 @@ pub async fn confirm_delete(event: &crate::ui::state::EventData) -> bool {
 /// 宿主定时器事件分派
 pub async fn handle_timer_event(payload: &str) {
     let payload = unwrap_timer_payload(payload);
+    if let Some(generation) = payload.strip_prefix("background_timeout:").and_then(|v|v.parse::<u64>().ok()) {
+        let retry = {
+            let mut state = write_state();
+            if generation != state.background_timer { return; }
+            let Some(request) = state.result_request.clone().filter(|r|r.purpose == SendPurpose::Background) else { return; };
+            if state.background_retries >= 2 {
+                drop(state);
+                set_status(StatusKind::Error, "背景分片无响应，保存结果待核实；请重连后查询原结果");
+                query_original_result().await;
+                return;
+            }
+            state.background_retries += 1;
+            (request.device_addr, state.background_frame.clone())
+        };
+        if let Some(frame) = retry.1 {
+            arm_background_timeout();
+            let _ = interconnect::send_qaic_message(retry.0, PKG_NAME.into(), frame).await;
+        }
+        return;
+    }
     if let Some(token) = payload.strip_prefix(PREPARE_TIMER).and_then(|value| value.parse::<u64>().ok()) {
         let render = {
             let mut state = write_state();

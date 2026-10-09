@@ -186,6 +186,17 @@ impl Route {
 }
 
 pub struct UiState {
+    pub background_bytes: Vec<u8>,
+    pub background_offset: usize,
+    pub background_frame: Option<String>,
+    pub background_retries: u32,
+    pub background_timer: u64,
+    pub background_width: String,
+    pub background_height: String,
+    pub background_cover: bool,
+    pub background_preview: Option<String>,
+    pub background_detail: String,
+    pub background_device: Option<String>,
     pub backup_preview: Option<super::backup::Preview>,
     pub snapshot_complete: bool,
     pub local_file_busy: bool,
@@ -241,6 +252,11 @@ pub struct UiState {
 impl UiState {
     pub fn new(today: String) -> Self {
         UiState {
+            background_bytes: Vec::new(), background_offset: 0, background_frame: None,
+            background_retries: 0, background_timer: 0,
+            background_width: "192".into(), background_height: "490".into(),
+            background_cover: true, background_preview: None, background_detail: String::new(),
+            background_device: None,
             backup_preview: None, snapshot_complete: false, local_file_busy: false,
             list_sort: "created".into(), list_category: "all".into(), list_archived: false,
             list_period: "all".into(),
@@ -399,6 +415,7 @@ impl UiState {
         let from_snapshot = matches!(payload.get("type").and_then(|v| v.as_str()), Some("changeEvent" | "deleteEvent" | "moveEvent" | "setPrimary" | "restoreBackup"));
         if from_snapshot && self.snapshot_device.as_deref() != Some(device_addr.as_str()) { return false; }
         if from_snapshot && payload.get("index").is_some() && self.snapshot_token.is_none() { return false; }
+        if pending.purpose == SendPurpose::Background && self.background_device.as_deref() != Some(device_addr.as_str()) { return false; }
         if self.target_device.as_deref().is_some_and(|target| target != device_addr) {
             self.session_id = format!("{}-{}", self.session_id, self.send_sequence);
             self.all_events.clear();
@@ -449,6 +466,21 @@ impl UiState {
         self.capabilities = value.get("capabilities").and_then(|v| v.as_array()).map(|items|
             items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect()).unwrap_or_default();
         self.handshake_ready = true;
+        let dimensions = value.get("screenWidth").and_then(|v|v.as_u64()).zip(value.get("screenHeight").and_then(|v|v.as_u64()));
+        if let Some((width, height)) = dimensions.filter(|(w,h)| (1..=2048).contains(w) && (1..=2048).contains(h)) {
+            let width = width.to_string();
+            let height = height.to_string();
+            if self.background_device.as_deref() != Some(pending.device_id.as_str()) || self.background_width != width || self.background_height != height {
+                self.background_preview = None;
+                self.background_detail.clear();
+            }
+            self.background_width = width;
+            self.background_height = height;
+            self.background_device = Some(pending.device_id.clone());
+        } else {
+            self.background_device = None;
+            self.background_preview = None;
+        }
         true
     }
 
@@ -759,6 +791,7 @@ impl UiState {
             return false;
         }
         let token = request.token;
+        let background_operation = request.purpose == SendPurpose::Background;
         let primary_operation = serde_json::from_str::<serde_json::Value>(&request.payload).ok()
             .is_some_and(|payload| payload["type"] == "setPrimary");
         let restore_operation = serde_json::from_str::<serde_json::Value>(&request.payload).ok()
@@ -785,6 +818,11 @@ impl UiState {
         self.recovery_snapshot = None;
         self.result_deadline = None;
         self.awaiting_confirmation = false;
+        if background_operation {
+            self.background_bytes.clear();
+            self.background_frame = None;
+            self.background_timer += 1;
+        }
         self.awaiting_revision = None;
         if ok {
             self.snapshot_complete = false;
@@ -799,7 +837,9 @@ impl UiState {
                 self.event_page = 0;
             }
             if let Some(revision) = revision { self.revision = Some(self.revision.unwrap_or(0).max(revision)); }
-            self.status = Some(if restore_operation && partial {
+            self.status = Some(if background_operation {
+                StatusMessage::success("背景文件及引用已保存；请在腕端核实固件图片显示")
+            } else if restore_operation && partial {
                 StatusMessage::error("事件恢复已保存，但表盘文件同步失败；请重新同步列表，勿重复恢复")
             } else if restore_operation {
                 StatusMessage::success("事件恢复已保存，请重新同步腕端列表")
@@ -1346,6 +1386,23 @@ mod tests {
         state.target_device = Some("b".into());
         let token = state.reserve_send(r#"{"type":"changeEvent","id":"e1"}"#.into(), SendPurpose::Mutation).unwrap();
         assert!(!state.attach_send_device(token, "b".into()), "快照属于 a，不能在 b 操作");
+    }
+
+    #[test]
+    fn 屏幕尺寸仅接受本次设备握手并使旧预览失效() {
+        let (mut state, token) = waiting_result();
+        state.start_handshake(token);
+        state.background_preview = Some("old".into());
+        let mut reply = serde_json::json!({"sessionId":"session","protocolVersion":2,"handshakeId":format!("hello-{token}"),
+            "deviceId":"other","screenWidth":336,"screenHeight":480,"capabilities":[]});
+        assert!(!state.accept_capabilities(&reply));
+        assert_eq!(state.background_width,"192");
+        reply["deviceId"] = serde_json::json!("watch");
+        assert!(state.accept_capabilities(&reply));
+        assert_eq!(state.background_width,"336");
+        assert_eq!(state.background_height,"480");
+        assert_eq!(state.background_device.as_deref(),Some("watch"));
+        assert!(state.background_preview.is_none());
     }
 
     #[test]

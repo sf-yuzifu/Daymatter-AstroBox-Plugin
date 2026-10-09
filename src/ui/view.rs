@@ -94,6 +94,7 @@ pub struct ViewModel {
 pub enum CardBlock {
     Note { title: &'static str, description: String, symbol: &'static str },
     Actionable { title: String, description: String, symbol: &'static str, event: String },
+    Image { source: String, description: String, width: u32, height: u32 },
 }
 
 impl ViewModel {
@@ -124,6 +125,7 @@ impl ViewModel {
                 CardBlock::Actionable { title, description, event, .. } => {
                     feed(&format!("card:{}:{}:{}", title, description, event))
                 }
+                CardBlock::Image { source, description, width, height } => feed(&format!("image:{}:{}:{}x{}", source, description, width, height)),
             }
         }
         if let Some(list) = &self.list {
@@ -487,14 +489,28 @@ pub fn build(state: &UiState) -> ViewModel {
             });
         }
         (EventType::AddBackground, _) => {
+            model.cards.push(CardBlock::Actionable {title: "读取连接设备屏幕".into(),
+                description: if state.background_device.is_some() {format!("腕端实际尺寸 {}×{}；更换设备后重新读取",state.background_width,state.background_height)} else {"自动从腕端获取实际宽高，请先读取；需要最新腕端应用".into()},
+                symbol: "watch", event: UiId::Fetch(FormScope::Modify).as_str()});
+            model.cards.push(CardBlock::Actionable { title: if state.background_cover { "居中裁剪填满" } else { "等比留黑边" }.into(),
+                description: "点击切换；保持比例，不拉伸。选图后先预览再发送。".into(), symbol: "image", event: UiId::BackgroundMode.as_str() });
             model.cards.push(CardBlock::Note {
                 title: "背景图片",
-                description: "支持 PNG / JPG / JPEG；输入≤16MiB、单边≤8192px、≤8Mi像素，输出≤450px/100KiB JPEG（透明合成白底）。腕端保存失败保留旧背景，发送成功仍需核实显示".to_string(),
+                description: "支持 PNG / JPG / JPEG；输入≤16MiB/8Mi像素。按设备原尺寸生成（单边≤512px），JPEG≤100KiB，透明合成白底；3KiB小分片逐片落盘确认，最终保存失败保留旧背景".to_string(),
                 symbol: "image",
             });
+            if let Some(preview) = &state.background_preview {
+                let screen_width = state.background_width.parse::<u32>().unwrap_or(192).max(1);
+                let screen_height = state.background_height.parse::<u32>().unwrap_or(490).max(1);
+                let longest = screen_width.max(screen_height);
+                let width = (u64::from(screen_width) * 280 / u64::from(longest)).max(1) as u32;
+                let height = (u64::from(screen_height) * 280 / u64::from(longest)).max(1) as u32;
+                model.cards.push(CardBlock::Image {source: format!("data:image/jpeg;base64,{}", preview), description: state.background_detail.clone(), width, height});
+                model.secondary = Some(ActionView {id: UiId::PickBackground, label: "重新选图".into(), kind: ButtonKind::AccentQuiet, enabled: !busy});
+            }
             model.primary = Some(ActionView {
-                id: UiId::PickBackground,
-                label: "选择背景图片".to_string(),
+                id: if state.background_preview.is_some() { UiId::SendBackground } else { UiId::PickBackground },
+                label: if state.background_preview.is_some() { "发送预览成品到腕端" } else { "选择图片并预览" }.to_string(),
                 kind: ButtonKind::Secondary,
                 enabled: !busy,
             });
@@ -734,6 +750,22 @@ mod tests {
 
     fn rows_of(view: &ViewModel) -> Vec<EventRowView> {
         view.list.as_ref().map(|list| list.rows.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn 背景预览保持设备比例而非全宽拉伸() {
+        let mut state = UiState::new("2026-10-09".into());
+        state.current_tab = EventType::AddBackground;
+        state.background_preview = Some("jpeg".into());
+        for (w,h,expected) in [(336,480,(196,280)),(192,490,(109,280)),(480,480,(280,280))] {
+            state.background_width = w.to_string();
+            state.background_height = h.to_string();
+            let view = build(&state);
+            let dimensions = view.cards.iter().find_map(|card| match card {
+                CardBlock::Image {width,height,..} => Some((*width,*height)), _ => None
+            }).unwrap();
+            assert_eq!(dimensions,expected);
+        }
     }
 
     #[test]
