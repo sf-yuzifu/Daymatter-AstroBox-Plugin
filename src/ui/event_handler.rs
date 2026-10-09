@@ -282,7 +282,10 @@ async fn pick_background() {
         message::set_status_timed(StatusKind::Error, "未选择图片");
         return;
     };
-    match crate::ui::image::compress_for_watch(&picked.data) {
+    let compressed = crate::ui::image::compress_for_watch(&picked.data);
+    // 不把原始大图保留到连接/发送await期间。
+    drop(picked);
+    match compressed {
         Ok(compressed) => {
             if message::launch_then_send(
                 protocol::add_background(&STANDARD.encode(&compressed)),

@@ -1,5 +1,5 @@
 //! 插件 UI 分层：纯逻辑层（状态 / 事件表 / 视图模型 / 协议 / 校验）可在 host 上跑测试，
-//! 宿主层（渲染 / 事件处理 / 消息 / 图片）只在 wasm32 编译。
+//! 图片处理也可在host验证；宿主层（渲染 / 事件处理 / 消息）只在 wasm32 编译。
 
 pub mod dispatch;
 pub mod backup;
@@ -14,7 +14,7 @@ pub mod view;
 mod build;
 #[cfg(target_arch = "wasm32")]
 mod event_handler;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 mod image;
 #[cfg(target_arch = "wasm32")]
 mod message;

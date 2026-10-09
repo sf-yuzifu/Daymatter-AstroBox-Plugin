@@ -489,7 +489,7 @@ pub fn build(state: &UiState) -> ViewModel {
         (EventType::AddBackground, _) => {
             model.cards.push(CardBlock::Note {
                 title: "背景图片",
-                description: "支持 PNG / JPG / JPEG，压缩到最长边 450px 且不超过 100KB；新图发送成功前不会替换腕端当前背景".to_string(),
+                description: "支持 PNG / JPG / JPEG；输入≤16MiB、单边≤8192px、≤8Mi像素，输出≤450px/100KiB JPEG（透明合成白底）。腕端保存失败保留旧背景，发送成功仍需核实显示".to_string(),
                 symbol: "image",
             });
             model.primary = Some(ActionView {
