@@ -226,9 +226,9 @@ pub async fn drive_pending_send(token: u64) {
     }
     let mut business: serde_json::Value = serde_json::from_str(&pending.payload).unwrap_or_default();
     let capabilities = read_state().capabilities.clone();
-    if pending.purpose == SendPurpose::Background && !["backgroundChunks", "backgroundResult", "requestId", "mutationResult"].iter().all(|c|read_state().supports(c)) {
+    if pending.purpose == SendPurpose::Background && !["backgroundChunks", "backgroundChunks24KiB", "background256KiB", "backgroundResult", "requestId", "mutationResult"].iter().all(|c|read_state().supports(c)) {
         clear_reservation(token);
-        set_status(StatusKind::Error, "腕端未确认小分片背景能力，请更新腕端并重新读取屏幕");
+        set_status(StatusKind::Error, "腕端未确认24KiB分片/256KiB背景能力，请更新腕端并重新读取屏幕");
         return;
     }
     if let Err(error) = protocol::gate_extensions(&mut business, &capabilities) {

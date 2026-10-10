@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value};
 use super::state::{SendPurpose, UiState};
 
-pub const CHUNK_BYTES: usize = 3072;
+pub const CHUNK_BYTES: usize = 24 * 1024;
 
 pub fn checksum(bytes: &[u8]) -> u32 {
     bytes.iter().fold(2166136261u32, |hash, byte| (hash ^ u32::from(*byte)).wrapping_mul(16777619))
@@ -51,18 +51,18 @@ mod tests {
         assert!(state.attach_send_device(token, "d".into()));
         let request = state.pending_send.clone().unwrap();
         state.begin_result_wait(&request);
-        state.background_bytes = vec![1; 4000];
+        state.background_bytes = vec![1; CHUNK_BYTES + 1000];
         state.background_frame = Some(request.payload.clone());
         let ack = |next| json!({"sessionId":request.session_id,"requestId":request.request_id,"deviceId":"d","next":next});
         let mut wrong = ack(0); wrong["deviceId"] = json!("other");
         assert!(accept_ack(&mut state, &wrong).is_none());
         assert!(accept_ack(&mut state, &ack(0)).is_some()); // transport callback尚未到达
         assert!(accept_ack(&mut state, &ack(0)).is_none());
-        assert!(accept_ack(&mut state, &ack(4000)).is_none());
-        assert!(accept_ack(&mut state, &ack(3072)).is_some());
-        assert!(accept_ack(&mut state, &ack(3072)).is_none());
-        assert!(accept_ack(&mut state, &ack(4000)).is_some());
-        assert!(accept_ack(&mut state, &ack(4000)).is_none());
+        assert!(accept_ack(&mut state, &ack(CHUNK_BYTES + 1000)).is_none());
+        assert!(accept_ack(&mut state, &ack(CHUNK_BYTES)).is_some());
+        assert!(accept_ack(&mut state, &ack(CHUNK_BYTES)).is_none());
+        assert!(accept_ack(&mut state, &ack(CHUNK_BYTES + 1000)).is_some());
+        assert!(accept_ack(&mut state, &ack(CHUNK_BYTES + 1000)).is_none());
         assert_eq!(serde_json::from_str::<Value>(state.background_frame.as_ref().unwrap()).unwrap()["type"], "finishBG");
     }
 }

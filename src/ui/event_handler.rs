@@ -331,7 +331,7 @@ async fn pick_background() {
             {
                 let mut state = write_state();
                 state.background_preview = Some(STANDARD.encode(&compressed));
-                state.background_detail = format!("原尺寸{}×{} · {} · JPEG {}B；3KiB小分片逐片落盘，确认后才发送。", target.0, target.1,
+                state.background_detail = format!("原尺寸{}×{} · {} · PNG {}B；24KiB分片逐片落盘，确认后才发送。", target.0, target.1,
                     if target.2 {"居中裁剪"} else {"等比留黑边"}, compressed.len());
             }
             message::set_status(StatusKind::Success, "成品已生成，请核对预览后发送");

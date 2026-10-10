@@ -496,7 +496,7 @@ pub fn build(state: &UiState) -> ViewModel {
                 description: "点击切换；保持比例，不拉伸。选图后先预览再发送。".into(), symbol: "image", event: UiId::BackgroundMode.as_str() });
             model.cards.push(CardBlock::Note {
                 title: "背景图片",
-                description: "支持 PNG / JPG / JPEG；输入≤16MiB/8Mi像素。按设备原尺寸生成（单边≤512px），JPEG≤100KiB，透明合成白底；3KiB小分片逐片落盘确认，最终保存失败保留旧背景".to_string(),
+                description: "支持 PNG / JPG / JPEG；输入≤16MiB/8Mi像素。按设备原尺寸生成（单边≤512px），PNG无损压缩≤256KiB，透明合成白底；24KiB分片逐片落盘确认，最终保存失败保留旧背景".to_string(),
                 symbol: "image",
             });
             if let Some(preview) = &state.background_preview {
@@ -505,7 +505,7 @@ pub fn build(state: &UiState) -> ViewModel {
                 let longest = screen_width.max(screen_height);
                 let width = (u64::from(screen_width) * 280 / u64::from(longest)).max(1) as u32;
                 let height = (u64::from(screen_height) * 280 / u64::from(longest)).max(1) as u32;
-                model.cards.push(CardBlock::Image {source: format!("data:image/jpeg;base64,{}", preview), description: state.background_detail.clone(), width, height});
+                model.cards.push(CardBlock::Image {source: format!("data:image/png;base64,{}", preview), description: state.background_detail.clone(), width, height});
                 model.secondary = Some(ActionView {id: UiId::PickBackground, label: "重新选图".into(), kind: ButtonKind::AccentQuiet, enabled: !busy});
             }
             model.primary = Some(ActionView {

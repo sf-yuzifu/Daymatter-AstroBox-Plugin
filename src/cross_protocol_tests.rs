@@ -16,7 +16,7 @@ fn wrist(input: Value) -> Value {
 fn background_sender_actual_wrist_chunks_ack_checksum_and_failure() {
     use crate::ui::background;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let mut bytes = vec![1u8; 7000];
+    let mut bytes = vec![1u8; 256 * 1024];
     bytes[..15].copy_from_slice(&[255,216,255,192,0,11,8,1,224,1,80,1,1,17,0]);
     let mut state = UiState::new("2026-10-09".into());
     state.session_id = "bg-session".into();
@@ -41,7 +41,7 @@ fn background_sender_actual_wrist_chunks_ack_checksum_and_failure() {
             break;
         }
         let next = background::accept_ack(&mut state,reply).expect("actual wrist ACK must advance sender");
-        assert!(next.1.len() < 4600);
+        assert!(next.1.len() < 33 * 1024);
         assert!(background::accept_ack(&mut state,reply).is_none(),"duplicate ACK ignored");
         messages.push(next.1);
     }

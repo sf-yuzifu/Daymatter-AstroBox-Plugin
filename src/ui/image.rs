@@ -1,15 +1,14 @@
-//! 背景图片压缩：先检查输入尺寸与解码预算，再生成有界 JPEG。
+//! 背景图片压缩：先检查输入尺寸与解码预算，再生成无损 PNG。
 
 use image::{imageops::FilterType, GenericImageView, ImageReader};
 use std::io::Cursor;
 
 pub const MAX_EDGE: u32 = 450;
-pub const MAX_BYTES: usize = 100 * 1024;
+pub const MAX_BYTES: usize = 256 * 1024;
 pub const MAX_INPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_INPUT_EDGE: u32 = 8192;
 const MAX_INPUT_PIXELS: u64 = 8 * 1024 * 1024;
 const MAX_DECODE_ALLOC: u64 = 64 * 1024 * 1024;
-const QUALITY_STEPS: [u8; 7] = [85, 80, 75, 70, 65, 60, 55];
 
 fn reader(data: &[u8]) -> Result<ImageReader<Cursor<&[u8]>>, String> {
     let mut reader = ImageReader::new(Cursor::new(data))
@@ -83,7 +82,7 @@ fn prepare(image_data: &[u8], target: Option<(u32, u32, bool)>) -> Result<Vec<u8
         decoded.resize(target_width, target_height, FilterType::Lanczos3)
     };
 
-    // JPEG不支持透明通道；只在缩小后的有界图片上合成白底。
+    // 保持既有透明合成白底效果；PNG编码对合成后的RGB像素无损。
     let rgba = resized.to_rgba8();
     drop(resized);
     let mut rgb = image::RgbImage::new(rgba.width(), rgba.height());
@@ -95,17 +94,17 @@ fn prepare(image_data: &[u8], target: Option<(u32, u32, bool)>) -> Result<Vec<u8
     }
     drop(rgba);
     let mut output = Vec::new();
-    for quality in QUALITY_STEPS {
-        output.clear();
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, quality);
-        rgb
-            .write_with_encoder(encoder)
-            .map_err(|error| format!("编码 JPEG 失败: {}", error))?;
-        if output.len() <= MAX_BYTES {
-            return Ok(output);
-        }
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        &mut output,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    );
+    rgb.write_with_encoder(encoder)
+        .map_err(|error| format!("编码 PNG 失败: {}", error))?;
+    if output.len() <= MAX_BYTES {
+        return Ok(output);
     }
-    Err(format!("压缩后仍超过 {}KB，请换一张更小的图片", MAX_BYTES / 1024))
+    Err(format!("PNG无损压缩后仍超过 {}KiB，请换一张内容更简洁的图片", MAX_BYTES / 1024))
 }
 
 fn scaled(width: u32, height: u32) -> (u32, u32) {
@@ -165,16 +164,38 @@ mod tests {
     }
 
     #[test]
-    fn 透明图合成白底并输出真实有界jpeg() {
+    fn 透明图合成白底并输出真实有界png() {
         let rgba = image::RgbaImage::from_pixel(900, 450, image::Rgba([255, 0, 0, 0]));
         let mut data = Cursor::new(Vec::new());
         rgba.write_to(&mut data, image::ImageFormat::Png).unwrap();
         let output = compress_for_watch(data.get_ref()).unwrap();
         assert!(output.len() <= MAX_BYTES);
-        assert_eq!(image::guess_format(&output).unwrap(), image::ImageFormat::Jpeg);
+        assert_eq!(image::guess_format(&output).unwrap(), image::ImageFormat::Png);
         let decoded = image::load_from_memory(&output).unwrap().to_rgb8();
         assert_eq!(decoded.dimensions(), (450, 225));
-        assert!(decoded.get_pixel(0, 0).0.iter().all(|value| *value >= 250));
+        assert_eq!(decoded.get_pixel(0, 0).0, [255, 255, 255]);
+    }
+
+    #[test]
+    fn png编码保持原尺寸rgb像素且拒绝超限噪声图() {
+        let mut source = image::RgbImage::new(512, 512);
+        let mut seed = 1u32;
+        for pixel in source.pixels_mut() {
+            for channel in &mut pixel.0 {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                *channel = seed as u8;
+            }
+        }
+        let mut data = Cursor::new(Vec::new());
+        source.write_to(&mut data, image::ImageFormat::Png).unwrap();
+        assert!(prepare_for_screen(data.get_ref(), 512, 512, true).unwrap_err().contains("256KiB"));
+        let source = image::imageops::crop_imm(&source, 0, 0, 64, 64).to_image();
+        let mut data = Cursor::new(Vec::new());
+        source.write_to(&mut data, image::ImageFormat::Png).unwrap();
+        let output = prepare_for_screen(data.get_ref(), 64, 64, true).unwrap();
+        assert_eq!(image::load_from_memory(&output).unwrap().to_rgb8(), source);
     }
 
     #[test]
