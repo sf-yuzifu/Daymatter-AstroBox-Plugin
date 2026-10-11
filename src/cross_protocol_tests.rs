@@ -16,8 +16,8 @@ fn wrist(input: Value) -> Value {
 fn background_sender_actual_wrist_chunks_ack_checksum_and_failure() {
     use crate::ui::background;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let mut bytes = vec![1u8; 256 * 1024];
-    bytes[..15].copy_from_slice(&[255,216,255,192,0,11,8,1,224,1,80,1,1,17,0]);
+    let mut bytes = vec![1u8; 1024 * 1024];
+    bytes[..33].copy_from_slice(&[137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,2,8,0,0,2,8,8,2,0,0,0,0,0,0,0]);
     let mut state = UiState::new("2026-10-09".into());
     state.session_id = "bg-session".into();
     state.background_device = Some("watch".into());
@@ -30,6 +30,9 @@ fn background_sender_actual_wrist_chunks_ack_checksum_and_failure() {
     let begin = protocol::set_request_identity_for(&request.payload,&request.request_id,&request.session_id,&request.device_id);
     state.background_frame = Some(begin.clone());
     let mut messages = vec![protocol::handshake(&request.session_id,token,"watch"),begin];
+    let capabilities = wrist(json!({"messages":[messages[0]]}));
+    assert!(capabilities["messages"].as_array().unwrap().iter().any(|reply|
+        reply["capabilities"].as_array().is_some_and(|items| items.iter().any(|item| item == "background1MiB"))));
     loop {
         let output = wrist(json!({"messages":messages,"flushEach":true,"deferWrites":true}));
         let reply = output["messages"].as_array().unwrap().last().unwrap();

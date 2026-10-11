@@ -3,8 +3,8 @@
 use image::{imageops::FilterType, GenericImageView, ImageReader};
 use std::io::Cursor;
 
-pub const MAX_EDGE: u32 = 450;
-pub const MAX_BYTES: usize = 256 * 1024;
+pub const MAX_EDGE: u32 = 520;
+pub const MAX_BYTES: usize = 1024 * 1024;
 pub const MAX_INPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_INPUT_EDGE: u32 = 8192;
 const MAX_INPUT_PIXELS: u64 = 8 * 1024 * 1024;
@@ -39,8 +39,8 @@ pub fn compress_for_watch(image_data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 pub fn prepare_for_screen(data: &[u8], width: u32, height: u32, cover: bool) -> Result<Vec<u8>, String> {
-    if width == 0 || height == 0 || width > 512 || height > 512 {
-        return Err("原尺寸背景预算为单边1～512px".into());
+    if width == 0 || height == 0 || width > MAX_EDGE || height > MAX_EDGE {
+        return Err(format!("原尺寸背景预算为单边1～{}px", MAX_EDGE));
     }
     prepare(data, Some((width, height, cover)))
 }
@@ -128,12 +128,12 @@ mod tests {
 
     #[test]
     fn 等比缩放且不放大() {
-        assert_eq!(scaled(1200, 600), (MAX_EDGE, 225));
-        assert_eq!(scaled(600, 1200), (225, MAX_EDGE));
+        assert_eq!(scaled(1200, 600), (MAX_EDGE, 260));
+        assert_eq!(scaled(600, 1200), (260, MAX_EDGE));
         assert_eq!(scaled(300, 200), (300, 200));
         assert_eq!(scaled(0, 0), (0, 0));
-        assert_eq!(scaled(8192, 1), (450, 1));
-        assert_eq!(scaled(1, 8192), (1, 450));
+        assert_eq!(scaled(8192, 1), (MAX_EDGE, 1));
+        assert_eq!(scaled(1, 8192), (1, MAX_EDGE));
     }
 
     #[test]
@@ -172,13 +172,13 @@ mod tests {
         assert!(output.len() <= MAX_BYTES);
         assert_eq!(image::guess_format(&output).unwrap(), image::ImageFormat::Png);
         let decoded = image::load_from_memory(&output).unwrap().to_rgb8();
-        assert_eq!(decoded.dimensions(), (450, 225));
+        assert_eq!(decoded.dimensions(), (520, 260));
         assert_eq!(decoded.get_pixel(0, 0).0, [255, 255, 255]);
     }
 
     #[test]
-    fn png编码保持原尺寸rgb像素且拒绝超限噪声图() {
-        let mut source = image::RgbImage::new(512, 512);
+    fn png编码保持520px原尺寸噪声图rgb像素() {
+        let mut source = image::RgbImage::new(520, 520);
         let mut seed = 1u32;
         for pixel in source.pixels_mut() {
             for channel in &mut pixel.0 {
@@ -190,12 +190,12 @@ mod tests {
         }
         let mut data = Cursor::new(Vec::new());
         source.write_to(&mut data, image::ImageFormat::Png).unwrap();
-        assert!(prepare_for_screen(data.get_ref(), 512, 512, true).unwrap_err().contains("256KiB"));
-        let source = image::imageops::crop_imm(&source, 0, 0, 64, 64).to_image();
-        let mut data = Cursor::new(Vec::new());
-        source.write_to(&mut data, image::ImageFormat::Png).unwrap();
-        let output = prepare_for_screen(data.get_ref(), 64, 64, true).unwrap();
+        let output = prepare_for_screen(data.get_ref(), 520, 520, true).unwrap();
+        assert!(output.len() > 256 * 1024);
+        assert!(output.len() <= MAX_BYTES);
         assert_eq!(image::load_from_memory(&output).unwrap().to_rgb8(), source);
+        assert!(prepare_for_screen(data.get_ref(), 521, 520, true).is_err());
+        assert!(prepare_for_screen(data.get_ref(), 520, 521, true).is_err());
     }
 
     #[test]
