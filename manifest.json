@@ -12,8 +12,7 @@
         "interconnect",
         "thirdpartyapp",
         "device",
-        "register_interconnect_recv",
-        "dialog"
+        "register_interconnect_recv"
     ],
     "additional_files": []
 }
