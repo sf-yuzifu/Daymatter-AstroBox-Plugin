@@ -208,20 +208,19 @@ pub fn action_card(title: &str, description: &str, symbol: &str, event: &str) ->
     card
 }
 
-/// 事件行：名称 + 徽标 + 可选箭头 / 选中态
+/// 事件行：名称与详情纵向排列 + 可选箭头 / 选中态
 pub fn event_row(title: &str, detail: &str, event: &str, selected: bool, navigates: bool) -> ui::Element {
     let (outline, background) = theme::row_outline(selected);
-    let mut content = row()
+    let mut content = column()
+        .gap(4)
         .flex_grow(1.0)
         .min_width(0)
-        .child(text(title, theme::font_body(), theme::TEXT));
+        .prop("style", "flex-basis:0")
+        .child(text(title, theme::font_body(), theme::TEXT).width_full());
     if !detail.is_empty() {
         content = content.child(
-            ui::Element::new(ui::ElementType::P, Some(detail))
-                .size(theme::font_hint())
-                .text_color(if selected { theme::ACCENT } else { theme::MUTED })
-                .flex_shrink(0.0)
-                .prop("style", "overflow-wrap:anywhere; margin:0"),
+            text(detail, theme::font_hint(), if selected { theme::ACCENT } else { theme::MUTED })
+                .width_full(),
         );
     }
     let mut element = row()
