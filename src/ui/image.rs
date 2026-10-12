@@ -93,6 +93,9 @@ fn prepare(image_data: &[u8], target: Option<(u32, u32, bool)>) -> Result<Vec<u8
         }
     }
     drop(rgba);
+    if target.is_some() {
+        mask_screen_corners(&mut rgb);
+    }
     let mut output = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new_with_quality(
         &mut output,
@@ -105,6 +108,37 @@ fn prepare(image_data: &[u8], target: Option<(u32, u32, bool)>) -> Result<Vec<u8
         return Ok(output);
     }
     Err(format!("PNG无损压缩后仍超过 {}KiB，请换一张内容更简洁的图片", MAX_BYTES / 1024))
+}
+
+// 对齐 daymatter-ng-watchface/devices.json 的预览形状。
+// 未收录尺寸保持矩形，不猜测未知设备的圆角。
+fn screen_radius(width: u32, height: u32) -> u32 {
+    match (width, height) {
+        (192, 490) | (212, 520) => width / 2,
+        (336, 480) => 48,
+        (432, 514) => 104,
+        (466, 466) | (480, 480) => width / 2,
+        _ => 0,
+    }
+}
+
+fn mask_screen_corners(rgb: &mut image::RgbImage) {
+    let (width, height) = rgb.dimensions();
+    let radius = screen_radius(width, height);
+    if radius == 0 { return; }
+    // 像素中心采样，直接原地填黑，不分配遮罩或透明通道。
+    let r = i64::from(radius) * 2;
+    for (x, y, pixel) in rgb.enumerate_pixels_mut() {
+        let px = i64::from(x) * 2 + 1;
+        let py = i64::from(y) * 2 + 1;
+        let cx = px.clamp(r, i64::from(width) * 2 - r);
+        let cy = py.clamp(r, i64::from(height) * 2 - r);
+        let dx = px - cx;
+        let dy = py - cy;
+        if dx * dx + dy * dy > r * r {
+            *pixel = image::Rgb([0, 0, 0]);
+        }
+    }
 }
 
 fn scaled(width: u32, height: u32) -> (u32, u32) {
@@ -199,6 +233,32 @@ mod tests {
     }
 
     #[test]
+    fn 屏幕形状外侧纯黑且成品保持rgb无透明通道() {
+        let source = image::RgbImage::from_pixel(32, 32, image::Rgb([255, 80, 40]));
+        let mut data = Cursor::new(Vec::new());
+        source.write_to(&mut data, image::ImageFormat::Png).unwrap();
+        for (w, h) in [(192, 490), (212, 520), (336, 480), (432, 514), (466, 466), (480, 480)] {
+            for cover in [true, false] {
+                let output = prepare_for_screen(data.get_ref(), w, h, cover).unwrap();
+                assert_eq!(output[25], 2, "PNG应为RGB而非RGBA");
+                let result = image::load_from_memory(&output).unwrap().to_rgb8();
+                assert_eq!(result.dimensions(), (w, h));
+                for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+                    assert_eq!(result.get_pixel(x, y).0, [0, 0, 0]);
+                }
+                assert_eq!(result.get_pixel(w / 2, h / 2).0, [255, 80, 40]);
+                if cover {
+                    assert_eq!(result.get_pixel(w / 2, 0).0, [255, 80, 40]);
+                    assert_eq!(result.get_pixel(0, h / 2).0, [255, 80, 40]);
+                }
+            }
+        }
+        let mut unknown = image::RgbImage::from_pixel(320, 385, image::Rgb([255, 80, 40]));
+        mask_screen_corners(&mut unknown);
+        assert_eq!(unknown.get_pixel(0, 0).0, [255, 80, 40]);
+    }
+
+    #[test]
     fn 目标比例裁剪与留边成品不拉伸() {
         let source = image::RgbImage::from_pixel(200, 100, image::Rgb([255, 0, 0]));
         let mut data = Cursor::new(Vec::new());
@@ -207,7 +267,7 @@ mod tests {
             let output = prepare_for_screen(data.get_ref(), 192, 490, cover).unwrap();
             let result = image::load_from_memory(&output).unwrap().to_rgb8();
             assert_eq!(result.dimensions(), (192, 490));
-            let top = result.get_pixel(88, 0);
+            let top = result.get_pixel(96, 0);
             if cover { assert!(top[0] > 240); } else { assert!(top.0.iter().all(|v| *v < 10)); }
             assert!(result.get_pixel(88, 225)[0] > 240);
         }
