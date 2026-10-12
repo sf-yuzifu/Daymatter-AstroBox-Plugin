@@ -33,6 +33,8 @@ fn background_sender_actual_wrist_chunks_ack_checksum_and_failure() {
     let capabilities = wrist(json!({"messages":[messages[0]]}));
     assert!(capabilities["messages"].as_array().unwrap().iter().any(|reply|
         reply["capabilities"].as_array().is_some_and(|items| items.iter().any(|item| item == "background1MiB"))));
+    assert!(capabilities["messages"].as_array().unwrap().iter().any(|reply|
+        reply["capabilities"].as_array().is_some_and(|items| items.iter().any(|item| item == "backgroundChunks18KiB"))));
     loop {
         let output = wrist(json!({"messages":messages,"flushEach":true,"deferWrites":true}));
         let reply = output["messages"].as_array().unwrap().last().unwrap();
@@ -44,7 +46,7 @@ fn background_sender_actual_wrist_chunks_ack_checksum_and_failure() {
             break;
         }
         let next = background::accept_ack(&mut state,reply).expect("actual wrist ACK must advance sender");
-        assert!(next.1.len() < 33 * 1024);
+        assert!(next.1.len() < 25 * 1024);
         assert!(background::accept_ack(&mut state,reply).is_none(),"duplicate ACK ignored");
         messages.push(next.1);
     }

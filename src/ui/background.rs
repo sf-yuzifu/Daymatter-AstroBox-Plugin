@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value};
 use super::state::{SendPurpose, UiState};
 
-pub const CHUNK_BYTES: usize = 24 * 1024;
+pub const CHUNK_BYTES: usize = 18 * 1024;
 
 pub fn checksum(bytes: &[u8]) -> u32 {
     bytes.iter().fold(2166136261u32, |hash, byte| (hash ^ u32::from(*byte)).wrapping_mul(16777619))

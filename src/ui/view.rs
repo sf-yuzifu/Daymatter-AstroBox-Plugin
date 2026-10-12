@@ -496,7 +496,7 @@ pub fn build(state: &UiState) -> ViewModel {
                 description: "点击切换；保持比例，不拉伸。选图后先预览再发送。".into(), symbol: "image", event: UiId::BackgroundMode.as_str() });
             model.cards.push(CardBlock::Note {
                 title: "背景图片",
-                description: "支持 PNG / JPG / JPEG；输入≤16MiB/8Mi像素。按设备原尺寸生成（单边≤520px），PNG无损压缩≤1MiB，透明合成白底；24KiB分片逐片落盘确认，最终保存失败保留旧背景".to_string(),
+                description: "支持 PNG / JPG / JPEG；输入≤16MiB/8Mi像素。按设备原尺寸生成（单边≤520px），PNG无损压缩≤1MiB，透明合成白底；18KiB分片逐片落盘确认，最终保存失败保留旧背景".to_string(),
                 symbol: "image",
             });
             if let Some(preview) = &state.background_preview {
